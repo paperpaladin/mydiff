@@ -310,5 +310,51 @@ done
 echo
 echo "$agree agree with GNU diff byte-for-byte, $differ differ"
 
+# --- the adversarial family, kept separate because the two claims about it
+# --- are different strengths.
+# ---
+# --- On inputs drawn from a 1-to-3 symbol line alphabet there are many
+# --- distinct minimal edit scripts and only the boundary normaliser decides
+# --- between them. It is also the only family where GNU diff's *default*
+# --- output differs from its own --minimal output, because of
+# --- discard_confusing_lines, which we do not implement. So:
+# ---   hard assertion: we equal `diff --minimal -U N` on every pair. A
+# ---     failure here is a bug in us.
+# ---   measurement: how many also equal plain `diff -U N`. The shortfall is
+# ---     GNU choosing a different tie-break, and the suite proves that by
+# ---     checking GNU's own two answers also differ on exactly those pairs.
+echo
+echo "fuzz: $(python3 "$ROOT/t/gen.py" "$D/fuzz" --fuzz 400) adversarial pairs"
+fagree=0; fdiffer=0; fbogus=0
+for a in "$D"/fuzz/*.a; do
+	b=${a%.a}.b
+	nm=$(basename "$a" .a)
+	u=${nm##*-U}
+	diff --minimal -U "$u" "$a" "$b" > "$D/f.min"
+	diff -U "$u" "$a" "$b" > "$D/f.def"
+	"$M" -U "$u" "$a" "$b" > "$D/f.our"
+	if cmp -s "$D/f.min" "$D/f.our"; then
+		ok
+	else
+		bad "fuzz-minimal $nm" "$(diff "$D/f.min" "$D/f.our" | head -12)"
+	fi
+	if cmp -s "$D/f.def" "$D/f.our"; then
+		fagree=$((fagree+1))
+	else
+		fdiffer=$((fdiffer+1))
+		# The shortfall must be GNU disagreeing with itself. If GNU's
+		# default and --minimal agree and we still differ, that is a
+		# bug in us wearing a disguise.
+		if cmp -s "$D/f.def" "$D/f.min"; then
+			fbogus=$((fbogus+1))
+			bad "fuzz-unexplained $nm" \
+			    "GNU default == GNU --minimal, yet we differ"
+		fi
+	fi
+done
+echo "$fagree agree with plain \`diff -U N\`, $fdiffer differ"
+echo "of the $fdiffer, $((fdiffer-fbogus)) are GNU disagreeing with its own"
+echo "--minimal (discard_confusing_lines) and $fbogus are unexplained"
+
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" = 0 ]

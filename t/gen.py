@@ -15,6 +15,45 @@ import random
 import sys
 
 
+def fuzz(outdir, count):
+    """Adversarial pairs: tiny line alphabets, where many different minimal
+    edit scripts exist and the only thing deciding between them is the
+    boundary normaliser. This is the family that found every normalisation
+    bug in this project, and it is also the only family where GNU diff's
+    default output differs from its own --minimal output, so the harness
+    checks the two claims separately."""
+    os.makedirs(outdir, exist_ok=True)
+    for f in os.listdir(outdir):
+        os.remove(os.path.join(outdir, f))
+    rnd = random.Random(4242)
+    for i in range(count):
+        alpha = rnd.choice([1, 2, 3, 5, 20, 200])
+        L = rnd.randrange(0, 160)
+        a = ["v%d" % rnd.randrange(alpha) for _ in range(L)]
+        b = list(a)
+        for _ in range(rnd.randrange(0, 35)):
+            op = rnd.choice("idr")
+            if op == "i":
+                b.insert(rnd.randrange(len(b) + 1), "v%d" % rnd.randrange(alpha))
+            elif op == "d" and b:
+                del b[rnd.randrange(len(b))]
+            elif b:
+                b[rnd.randrange(len(b))] = "v%d" % rnd.randrange(alpha)
+        sa = "".join(x + "\n" for x in a)
+        sb = "".join(x + "\n" for x in b)
+        if rnd.random() < 0.25 and sa:
+            sa = sa[:-1]
+        if rnd.random() < 0.25 and sb:
+            sb = sb[:-1]
+        u = rnd.choice([0, 1, 2, 3, 3, 3, 5, 10])
+        base = os.path.join(outdir, "%04d-U%d" % (i + 1, u))
+        with open(base + ".a", "w") as fh:
+            fh.write(sa)
+        with open(base + ".b", "w") as fh:
+            fh.write(sb)
+    print(count)
+
+
 def main(outdir):
     os.makedirs(outdir, exist_ok=True)
     for f in os.listdir(outdir):
@@ -194,4 +233,7 @@ def main(outdir):
 
 
 if __name__ == "__main__":
-    main(sys.argv[1] if len(sys.argv) > 1 else "corpus")
+    if len(sys.argv) > 3 and sys.argv[2] == "--fuzz":
+        fuzz(sys.argv[1], int(sys.argv[3]))
+    else:
+        main(sys.argv[1] if len(sys.argv) > 1 else "corpus")
