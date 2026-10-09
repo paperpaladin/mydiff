@@ -417,5 +417,87 @@ echo "$fagree agree with plain \`diff -U N\`, $fdiffer differ"
 echo "of the $fdiffer, $((fdiffer-fbogus)) are GNU disagreeing with its own"
 echo "--minimal (discard_confusing_lines) and $fbogus are unexplained"
 
+# --- fail-closed. Everything above checks that we agree with GNU when the
+# --- input is good; nothing checked that we refuse bad input instead of
+# --- producing a plausible wrong answer. Exit 2 is the only acceptable
+# --- answer to all of these, and for the patch cases GNU patch is asked the
+# --- same question so that "strict" can be distinguished from "broken".
+status() {
+	_n=$1; _w=$2; shift 2
+	"$@" > "$D/n.out" 2> "$D/n.err"; _s=$?
+	if [ "$_s" = "$_w" ]; then ok
+	else bad "status $_n" "want exit $_w, got $_s
+$(cat "$D/n.err")"; fi
+}
+
+status missing-file      2 "$M" "$D/does-not-exist" "$D/c1"
+status missing-file-2    2 "$M" "$D/c1" "$D/does-not-exist"
+status directory         2 "$M" "$D" "$D/c1"
+status unknown-option    2 "$M" --no-such-option "$D/c1" "$D/c2"
+status too-few-args      2 "$M" "$D/c1"
+status too-many-args     2 "$M" "$D/c1" "$D/c2" "$D/c3"
+status patch-missing     2 "$M" -p "$D/does-not-exist" "$D/c1"
+status patch-no-orig     2 "$M" -p "$D/c1"
+
+# A hunk whose context does not match the file. GNU patch without -F0 would
+# search for somewhere it fits; we never do, and that is the point.
+printf -- '@@ -1,3 +1,3 @@
+ a
+-WRONG
++x
+ c
+' > "$D/n.bad"
+status patch-mismatch    2 "$M" -p "$D/n.bad" "$D/c1"
+# A hunk naming a line past the end of the file.
+printf -- '@@ -900,1 +900,1 @@
+-a
++b
+' > "$D/n.past"
+status patch-past-end    2 "$M" -p "$D/n.past" "$D/c1"
+# Hunks out of order, which we require to be increasing.
+printf -- '@@ -3 +3 @@
+-c
++z
+@@ -1 +1 @@
+-a
++y
+' > "$D/n.ooo"
+status patch-out-of-order 2 "$M" -p "$D/n.ooo" "$D/c1"
+# A hunk that stops in the middle of its own declared line count.
+printf -- '@@ -1,3 +1,3 @@
+ a
+-b
+' > "$D/n.trunc"
+status patch-truncated   2 "$M" -p "$D/n.trunc" "$D/c1"
+# A header whose counts do not match the body it is followed by.
+printf -- '@@ -1,2 +1,9 @@
+ a
+-b
++x
+' > "$D/n.count"
+status patch-miscounted  2 "$M" -p "$D/n.count" "$D/c1"
+
+# A patch with no hunks at all is not an error, it is a no-op: the result is
+# the original. GNU patch rejects it ("only garbage was found"); we are
+# deliberately laxer, because `mydiff A A` legitimately prints nothing and
+# feeding that back must be the identity.
+printf 'not a patch at all
+' > "$D/n.junk"
+status patch-junk-is-noop 0 "$M" -p "$D/n.junk" "$D/c1"
+if cmp -s "$D/n.out" "$D/c1"; then ok
+else bad "patch-junk-identity" "a no-op patch did not reproduce the input"; fi
+
+# And the one GNU patch agrees with us about: our strictness must not be
+# strictness about something GNU thinks is fine. If GNU patch -F0 accepts the
+# mismatching hunk, our refusal is a bug, not a policy.
+cp "$D/c1" "$D/n.work"
+if patch -s -F0 --no-backup-if-mismatch "$D/n.work" < "$D/n.bad" \
+     > /dev/null 2>&1; then
+	bad "patch-mismatch-agreement" \
+	    "GNU patch -F0 accepted the hunk we rejected"
+else
+	ok
+fi
+
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" = 0 ]
