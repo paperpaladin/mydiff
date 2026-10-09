@@ -737,7 +737,11 @@ int main(int argc, char **argv)
 	int ai = 1;
 
 	for (; ai < argc && argv[ai][0] == '-' && argv[ai][1]; ai++) {
-		if (!strcmp(argv[ai], "--minimal") || !strcmp(argv[ai], "-d"))
+		if (!strcmp(argv[ai], "-U") && ai + 1 < argc) {
+			context = strtol(argv[++ai], NULL, 10);
+			if (context < 0)
+				context = 0;
+		} else if (!strcmp(argv[ai], "--minimal") || !strcmp(argv[ai], "-d"))
 			minimal = 1;
 		else if (!strcmp(argv[ai], "--stat"))
 			mode = 1;
@@ -751,7 +755,7 @@ int main(int argc, char **argv)
 	}
 	if (argc - ai != 2) {
 		fprintf(stderr,
-		        "usage: %s [--minimal] A B\n"
+		        "usage: %s [-U N] [--minimal] A B\n"
 		        "       %s --stat A B      line/class/changed counts\n"
 		        "       %s --runs A B      the raw edit script\n",
 		        prog, prog, prog);

@@ -190,5 +190,25 @@ for p in "c1 c2" "c1 c1" "c4 c1" "c1 c4" "c4 c4" "c5 c6" "c6 c5" \
 	uni "$D/$1" "$D/$2"
 done
 
+# --- context width: `diff -U N` for several N, because the hunk-merge
+# --- threshold is 2*N+1 and so the grouping changes with it. -U 0 is the
+# --- interesting one: no context at all, so no two runs ever merge.
+uniU() {
+	diff -U "$1" "$2" "$3" > "$D/u.gnu"; _ws=$?
+	"$M" -U "$1" "$2" "$3" > "$D/u.our"; _gs=$?
+	if cmp -s "$D/u.gnu" "$D/u.our" && [ "$_ws" = "$_gs" ]; then ok
+	else bad "unified -U$1 $(basename "$2") $(basename "$3")" \
+	         "$(diff "$D/u.gnu" "$D/u.our")
+exit status: GNU $_ws, ours $_gs"; fi
+}
+
+for n in 0 1 2 5 10; do
+	for p in "g1 g2" "c5 c6" "big1 big2" "nn3 c1" "nl1 nl2" "c4 c1" \
+	         "dis1 dis2" "c1 c1"; do
+		set -- $p
+		uniU "$n" "$D/$1" "$D/$2"
+	done
+done
+
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" = 0 ]
