@@ -51,6 +51,14 @@ static void *xmalloc(size_t n)
 	return p;
 }
 
+static void *xcalloc(size_t n, size_t s)
+{
+	void *p = calloc(n ? n : 1, s);
+	if (!p)
+		die("out of memory", NULL);
+	return p;
+}
+
 static void slurp(struct file *f, const char *name)
 {
 	FILE *fp;
@@ -185,6 +193,259 @@ static long *classify(struct eqtab *t, const struct file *f)
 	return e;
 }
 
+/* --- the D-path search ----------------------------------------------------
+ *
+ * Myers 1986. Two breadth-first searches are run over the edit graph at once,
+ * one from the top-left corner and one from the bottom-right, each advancing
+ * one edit at a time. The furthest-reaching forward path on diagonal k after
+ * c edits is fd[k]; likewise bd[k] backwards. When the two frontiers touch,
+ * the point where they touch lies on a shortest path, and the problem splits
+ * there into two independent halves. That is the linear-space variant: cost
+ * O((N+M)D), space O(N+M), and no stored trace to walk backwards through.
+ *
+ * The tie-breaks here are not arbitrary. Where two incoming paths reach the
+ * same diagonal, which one is taken decides which of several equally short
+ * edit scripts comes out, and the output has to match GNU diff's choice byte
+ * for byte -- so `tlo >= thi ? tlo + 1 : thi` forward and `tlo < thi ? tlo :
+ * thi - 1` backward are copied from the shape diffutils' diffseq.h uses, not
+ * invented.
+ */
+#define SNAKE_LIMIT 20		/* a "big" snake, for the heuristic below */
+
+struct part {
+	long xmid, ymid;
+	int lo_minimal, hi_minimal;
+};
+
+struct ctx {
+	const long *xv, *yv;	/* equivalence classes of each file */
+	long *fd, *bd;		/* furthest-reaching paths, indexable < 0 */
+	char *ch0, *ch1;	/* output: per-line changed flags */
+	int heuristic;
+	long too_expensive;
+};
+
+/* Find a point on some shortest edit path between the two subsequences, and
+ * store it in *part. Returns nothing: the midpoint is the whole answer. */
+static void diag(long xoff, long xlim, long yoff, long ylim, int find_minimal,
+                 struct part *part, struct ctx *c)
+{
+	long *const fd = c->fd;
+	long *const bd = c->bd;
+	const long *const xv = c->xv;
+	const long *const yv = c->yv;
+	const long dmin = xoff - ylim;	/* lowest valid diagonal */
+	const long dmax = xlim - yoff;	/* highest valid diagonal */
+	const long fmid = xoff - yoff;	/* centre of the forward search */
+	const long bmid = xlim - ylim;	/* centre of the backward search */
+	long fmin = fmid, fmax = fmid;
+	long bmin = bmid, bmax = bmid;
+	long cost;
+	/* True when the far corner sits on an odd diagonal relative to the
+	 * near one; it decides which of the two frontiers can detect the
+	 * overlap, and getting it wrong costs one edit of minimality. */
+	const int odd = (fmid - bmid) & 1;
+
+	fd[fmid] = xoff;
+	bd[bmid] = xlim;
+
+	for (cost = 1;; cost++) {
+		long d;
+		int big_snake = 0;
+
+		/* Widen the forward frontier by one edit on each diagonal. */
+		if (fmin > dmin)
+			fd[--fmin - 1] = -1;
+		else
+			fmin++;
+		if (fmax < dmax)
+			fd[++fmax + 1] = -1;
+		else
+			fmax--;
+		for (d = fmax; d >= fmin; d -= 2) {
+			long x, y, oldx, tlo = fd[d - 1], thi = fd[d + 1];
+
+			x = tlo >= thi ? tlo + 1 : thi;
+			oldx = x;
+			y = x - d;
+			while (x < xlim && y < ylim && xv[x] == yv[y])
+				x++, y++;
+			if (x - oldx > SNAKE_LIMIT)
+				big_snake = 1;
+			fd[d] = x;
+			if (odd && bmin <= d && d <= bmax && bd[d] <= x) {
+				part->xmid = x;
+				part->ymid = y;
+				part->lo_minimal = part->hi_minimal = 1;
+				return;
+			}
+		}
+
+		/* And the backward frontier. */
+		if (bmin > dmin)
+			bd[--bmin - 1] = LONG_MAX;
+		else
+			bmin++;
+		if (bmax < dmax)
+			bd[++bmax + 1] = LONG_MAX;
+		else
+			bmax--;
+		for (d = bmax; d >= bmin; d -= 2) {
+			long x, y, oldx, tlo = bd[d - 1], thi = bd[d + 1];
+
+			x = tlo < thi ? tlo : thi - 1;
+			oldx = x;
+			y = x - d;
+			while (x > xoff && y > yoff && xv[x - 1] == yv[y - 1])
+				x--, y--;
+			if (oldx - x > SNAKE_LIMIT)
+				big_snake = 1;
+			bd[d] = x;
+			if (!odd && fmin <= d && d <= fmax && x <= fd[d]) {
+				part->xmid = x;
+				part->ymid = y;
+				part->lo_minimal = part->hi_minimal = 1;
+				return;
+			}
+		}
+
+		if (find_minimal)
+			continue;
+
+		/* shortcut: the two heuristics below are GNU diff's, and they
+		 * are the reason `diff` without --minimal can return a
+		 * non-minimal script. They are here only because matching
+		 * GNU's default output byte for byte is the project's bar.
+		 * Both are off under --minimal. Upgrade path, if the exactness
+		 * ever stops mattering: delete them and keep --minimal
+		 * behaviour always, which costs time on large files with many
+		 * changes and nothing else. */
+		if (cost > 200 && big_snake && c->heuristic) {
+			long best = 0;
+
+			for (d = fmax; d >= fmin; d -= 2) {
+				long dd = d - fmid;
+				long x = fd[d], y = fd[d] - d;
+				long v = (x - xoff) * 2 - dd;
+
+				if (v <= 12 * (cost + (dd < 0 ? -dd : dd)))
+					continue;
+				if (v > best && xoff + SNAKE_LIMIT <= x
+				    && x < xlim && yoff + SNAKE_LIMIT <= y
+				    && y < ylim) {
+					long k;
+					for (k = 1; xv[x - k] == yv[y - k]; k++)
+						if (k == SNAKE_LIMIT) {
+							best = v;
+							part->xmid = x;
+							part->ymid = y;
+							break;
+						}
+				}
+			}
+			if (best > 0) {
+				part->lo_minimal = 1;
+				part->hi_minimal = 0;
+				return;
+			}
+
+			best = 0;
+			for (d = bmax; d >= bmin; d -= 2) {
+				long dd = d - bmid;
+				long x = bd[d], y = bd[d] - d;
+				long v = (xlim - x) * 2 + dd;
+
+				if (v <= 12 * (cost + (dd < 0 ? -dd : dd)))
+					continue;
+				if (v > best && xoff < x
+				    && x <= xlim - SNAKE_LIMIT && yoff < y
+				    && y <= ylim - SNAKE_LIMIT) {
+					long k;
+					for (k = 0; xv[x + k] == yv[y + k]; k++)
+						if (k == SNAKE_LIMIT - 1) {
+							best = v;
+							part->xmid = x;
+							part->ymid = y;
+							break;
+						}
+				}
+			}
+			if (best > 0) {
+				part->lo_minimal = 0;
+				part->hi_minimal = 1;
+				return;
+			}
+		}
+
+		/* Gone well past the point of diminishing returns: split at
+		 * the best point either frontier reached and accept a
+		 * non-minimal answer rather than run for minutes. */
+		if (cost >= c->too_expensive) {
+			long fxbest = -1, fybest = 0, bxbest = 0, bybest = 0;
+			long bxbest_set = 0;
+
+			/* Best forward diagonal, by distance travelled. */
+			for (d = fmax; d >= fmin; d -= 2) {
+				long x = fd[d] < xlim ? fd[d] : xlim;
+				long y = x - d;
+				if (ylim < y)
+					x = ylim + d, y = ylim;
+				if (fxbest < x + y)
+					fxbest = x + y, fybest = d;
+			}
+			/* Best backward diagonal, likewise. */
+			for (d = bmax; d >= bmin; d -= 2) {
+				long x = xoff > bd[d] ? xoff : bd[d];
+				long y = x - d;
+				if (y < yoff)
+					x = yoff + d, y = yoff;
+				if (!bxbest_set || x + y < bxbest)
+					bxbest = x + y, bybest = d,
+					bxbest_set = 1;
+			}
+
+			if ((xlim + ylim) - bxbest < fxbest - (xoff + yoff)) {
+				part->xmid = (fxbest + fybest) / 2;
+				part->ymid = (fxbest - fybest) / 2;
+			} else {
+				part->xmid = (bxbest + bybest) / 2;
+				part->ymid = (bxbest - bybest) / 2;
+			}
+			part->lo_minimal = part->hi_minimal = 0;
+			return;
+		}
+	}
+}
+
+/* Mark every changed line between the two subsequences. Slides off the shared
+ * head and tail first -- which is both the common-prefix optimisation and the
+ * recursion's base case -- then splits at a midpoint and recurses. */
+static void compareseq(long xoff, long xlim, long yoff, long ylim,
+                       int find_minimal, struct ctx *c)
+{
+	const long *xv = c->xv, *yv = c->yv;
+
+	while (xoff < xlim && yoff < ylim && xv[xoff] == yv[yoff])
+		xoff++, yoff++;
+	while (xlim > xoff && ylim > yoff && xv[xlim - 1] == yv[ylim - 1])
+		xlim--, ylim--;
+
+	if (xoff == xlim) {
+		while (yoff < ylim)
+			c->ch1[yoff++] = 1;
+	} else if (yoff == ylim) {
+		while (xoff < xlim)
+			c->ch0[xoff++] = 1;
+	} else {
+		struct part part;
+		diag(xoff, xlim, yoff, ylim, find_minimal, &part, c);
+		compareseq(xoff, part.xmid, yoff, part.ymid,
+		           part.lo_minimal, c);
+		compareseq(part.xmid, xlim, part.ymid, ylim,
+		           part.hi_minimal, c);
+	}
+}
+
 int main(int argc, char **argv)
 {
 	struct file a, b;
@@ -200,7 +461,34 @@ int main(int argc, char **argv)
 	eq_init(&t, a.n + b.n);
 	ea = classify(&t, &a);
 	eb = classify(&t, &b);
-	(void)ea; (void)eb;
-	printf("lines %ld %ld classes %ld\n", a.n, b.n, t.nent);
+	{
+		struct ctx c;
+		long diags = a.n + b.n + 3, i, n0 = 0, n1 = 0;
+		long *fbuf = xmalloc(sizeof *fbuf * (size_t)diags);
+		long *bbuf = xmalloc(sizeof *bbuf * (size_t)diags);
+
+		/* One slack slot at the front of each changed array: the
+		 * boundary normaliser added later reads index -1. */
+		c.ch0 = (char *)xcalloc((size_t)a.n + 2, 1) + 1;
+		c.ch1 = (char *)xcalloc((size_t)b.n + 2, 1) + 1;
+		c.xv = ea;
+		c.yv = eb;
+		c.fd = fbuf + b.n + 1;
+		c.bd = bbuf + b.n + 1;
+		c.heuristic = 1;
+		c.too_expensive = 1;
+		for (i = a.n + b.n; i != 0; i >>= 2)
+			c.too_expensive <<= 1;
+		if (c.too_expensive < 4096)
+			c.too_expensive = 4096;
+
+		compareseq(0, a.n, 0, b.n, 0, &c);
+		for (i = 0; i < a.n; i++)
+			n0 += c.ch0[i];
+		for (i = 0; i < b.n; i++)
+			n1 += c.ch1[i];
+		printf("lines %ld %ld classes %ld changed %ld %ld\n",
+		       a.n, b.n, t.nent, n0, n1);
+	}
 	return 0;
 }
