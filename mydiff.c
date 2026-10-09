@@ -603,6 +603,117 @@ static void putline(const struct line *l)
 		putchar('\n');
 }
 
+/* --- unified output -------------------------------------------------------
+ *
+ * All of the arithmetic here is GNU's, because the bar is byte-identical
+ * output and the line numbers in an @@ header are the easiest thing in a diff
+ * to get subtly wrong. Three rules that are not obvious:
+ *
+ *  - two runs of changes land in the same hunk when the gap between them is
+ *    less than 2*context+1 lines, so that their context windows would overlap
+ *    or touch;
+ *  - a range of zero lines prints as "N,0" where N is the line *before* the
+ *    insertion point, not as "N" or "N,0" at the insertion point;
+ *  - a range of one line prints as just "N", with no count.
+ */
+static long context = 3;
+
+static void timestr(char *out, size_t n, const struct timespec *ts)
+{
+	struct tm tm;
+	char base[24], zone[8];
+
+	/* GNU's time_format is "%Y-%m-%d %H:%M:%S.%N %z"; %N is not in C11
+	 * strftime, so the nanoseconds go in by hand. */
+	if (!localtime_r(&ts->tv_sec, &tm)) {
+		snprintf(out, n, "?");
+		return;
+	}
+	strftime(base, sizeof base, "%Y-%m-%d %H:%M:%S", &tm);
+	strftime(zone, sizeof zone, "%z", &tm);
+	snprintf(out, n, "%s.%09ld %s", base, (long)ts->tv_nsec, zone);
+}
+
+/* A line range, from 0-based inclusive bounds. b < a means "no lines here". */
+static void prange(long a, long b)
+{
+	long ta = a + 1, tb = b + 1;
+
+	/* "<" and not "<=": with a == b the range is one line and prints as a
+	 * bare number. `diff -u` on two one-line files says "@@ -1 +1 @@",
+	 * and "<=" makes that "@@ -1,0 +1,0 @@". */
+	if (tb < ta)
+		printf("%ld,0", tb);
+	else if (ta == tb)
+		printf("%ld", tb);
+	else
+		printf("%ld,%ld", ta, tb - ta + 1);
+}
+
+static int print_unified(const struct file *a, const struct file *b,
+                         const struct script *sc)
+{
+	long k = 0;
+
+	if (!sc->n)
+		return 0;
+	{
+		char ta[64], tb[64];
+		timestr(ta, sizeof ta, &a->mtime);
+		timestr(tb, sizeof tb, &b->mtime);
+		printf("--- %s\t%s\n", a->name, ta);
+		printf("+++ %s\t%s\n", b->name, tb);
+	}
+
+	while (k < sc->n) {
+		long e = k, first0, last0, first1, last1, i, j;
+
+		while (e + 1 < sc->n
+		       && sc->r[e + 1].line0
+		          - (sc->r[e].line0 + sc->r[e].deleted)
+		          < 2 * context + 1)
+			e++;
+
+		first0 = sc->r[k].line0;
+		first1 = sc->r[k].line1;
+		last0 = sc->r[e].line0 + sc->r[e].deleted - 1;
+		last1 = sc->r[e].line1 + sc->r[e].inserted - 1;
+
+		first0 = first0 - context > 0 ? first0 - context : 0;
+		first1 = first1 - context > 0 ? first1 - context : 0;
+		last0 = last0 < a->n - context ? last0 + context : a->n - 1;
+		last1 = last1 < b->n - context ? last1 + context : b->n - 1;
+
+		fputs("@@ -", stdout);
+		prange(first0, last0);
+		fputs(" +", stdout);
+		prange(first1, last1);
+		fputs(" @@\n", stdout);
+
+		i = first0;
+		j = first1;
+		while (i <= last0 || j <= last1) {
+			if (k > e || i < sc->r[k].line0) {
+				putchar(' ');
+				putline(&a->l[i++]);
+				j++;
+			} else {
+				long n;
+				for (n = sc->r[k].deleted; n--;) {
+					putchar('-');
+					putline(&a->l[i++]);
+				}
+				for (n = sc->r[k].inserted; n--;) {
+					putchar('+');
+					putline(&b->l[j++]);
+				}
+				k++;
+			}
+		}
+	}
+	return 1;
+}
+
 int main(int argc, char **argv)
 {
 	struct file a, b;
@@ -706,5 +817,5 @@ int main(int argc, char **argv)
 		}
 		return sc.n ? 1 : 0;
 	}
-	return sc.n ? 1 : 0;
+	return print_unified(&a, &b, &sc);
 }

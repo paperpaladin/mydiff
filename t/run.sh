@@ -115,20 +115,16 @@ runs_gnu_minimal() {
 %<%>' "$1" "$2"
 }
 
+# Every comparison below goes through files and `cmp`, never through
+# "$(cmd)" = "$(cmd)". Command substitution strips trailing newlines from both
+# sides, so a missing final newline -- the exact bug this suite exists to
+# catch -- would compare equal. Found that in this harness, not in the code.
 runs() {
-	_w=$(diff --unchanged-line-format='' --old-line-format='-%L' \
-	          --new-line-format='+%L' --unchanged-group-format='' \
-	          --old-group-format='@
-%<' --new-group-format='@
-%>' --changed-group-format='@
-%<%>' "$1" "$2")
-	_g=$("$M" --runs "$1" "$2")
-	if [ "$_w" = "$_g" ]; then ok
+	runs_gnu_default "$1" "$2" > "$D/o.gnu"
+	"$M" --runs "$1" "$2" > "$D/o.our"
+	if cmp -s "$D/o.gnu" "$D/o.our"; then ok
 	else bad "runs $(basename "$1") $(basename "$2")" \
-	         "GNU:
-$_w
-ours:
-$_g"; fi
+	         "$(diff "$D/o.gnu" "$D/o.our")"; fi
 }
 
 seq 1 20 > "$D/g1"
@@ -155,14 +151,38 @@ done
 # --- default -- the suite says so instead of quietly passing.
 for p in "c7 c8" "c8 c7"; do
 	set -- $p
-	_gd=$(runs_gnu_default "$D/$1" "$D/$2")
-	_gm=$(runs_gnu_minimal "$D/$1" "$D/$2")
-	_o=$("$M" --runs "$D/$1" "$D/$2")
-	_om=$("$M" --minimal --runs "$D/$1" "$D/$2")
-	if [ "$_o" = "$_gm" ] && [ "$_o" = "$_om" ] && [ "$_gd" != "$_gm" ]
+	runs_gnu_default "$D/$1" "$D/$2" > "$D/k.gd"
+	runs_gnu_minimal "$D/$1" "$D/$2" > "$D/k.gm"
+	"$M" --runs "$D/$1" "$D/$2" > "$D/k.o"
+	"$M" --minimal --runs "$D/$1" "$D/$2" > "$D/k.om"
+	if cmp -s "$D/k.o" "$D/k.gm" && cmp -s "$D/k.o" "$D/k.om" \
+	   && ! cmp -s "$D/k.gd" "$D/k.gm"
 	then ok
 	else bad "known-divergence $1 $2" \
 	         "expected ours == gnu --minimal != gnu default"; fi
+done
+
+# --- unified output, the real bar: byte for byte against `diff -u`, headers
+# --- and mtime timestamps included. We format the timestamp the way GNU's
+# --- time_format does ("%Y-%m-%d %H:%M:%S.%N %z"), so there is nothing to
+# --- normalise away and the whole stream is compared.
+uni() {
+	diff -u "$1" "$2" > "$D/u.gnu"; _ws=$?
+	"$M" "$1" "$2" > "$D/u.our"; _gs=$?
+	if cmp -s "$D/u.gnu" "$D/u.our" && [ "$_ws" = "$_gs" ]; then ok
+	else bad "unified $(basename "$1") $(basename "$2")" \
+	         "$(diff "$D/u.gnu" "$D/u.our")
+exit status: GNU $_ws, ours $_gs"; fi
+}
+
+printf 'a\n' > "$D/s1"; printf 'b\n' > "$D/s2"
+# nl1/nl2 and friends are deliberately absent: the no-trailing-newline marker
+# does not exist yet and the next commit is the one that adds it.
+for p in "c1 c2" "c1 c1" "c4 c1" "c1 c4" "c4 c4" "c5 c6" "c6 c5" \
+         "c3 c5" "g1 g2" "g2 g1" "s1 s2" "s1 s1" "s1 c1" "big1 big2" \
+         "dis1 dis2"; do
+	set -- $p
+	uni "$D/$1" "$D/$2"
 done
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
