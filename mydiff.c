@@ -446,49 +446,154 @@ static void compareseq(long xoff, long xlim, long yoff, long ylim,
 	}
 }
 
+/* --- changed flags to an edit script --------------------------------------
+ *
+ * The two boolean arrays are a better representation than a list of edits,
+ * because they make the ordering ambiguity disappear: "delete A3, insert B3"
+ * and "insert B3, delete A3" are the same pair of arrays. Grouping them into
+ * runs, with unchanged lines advancing in lockstep, is all "build the edit
+ * script" means here.
+ */
+struct run {
+	long line0, deleted, line1, inserted;
+};
+
+struct script {
+	struct run *r;
+	long n, cap;
+};
+
+static void addrun(struct script *s, long l0, long d, long l1, long ins)
+{
+	if (s->n == s->cap) {
+		s->cap = s->cap ? s->cap * 2 : 64;
+		s->r = realloc(s->r, sizeof *s->r * (size_t)s->cap);
+		if (!s->r)
+			die("out of memory", NULL);
+	}
+	s->r[s->n].line0 = l0;
+	s->r[s->n].deleted = d;
+	s->r[s->n].line1 = l1;
+	s->r[s->n].inserted = ins;
+	s->n++;
+}
+
+static void build_script(struct script *s, const char *ch0, long n0,
+                         const char *ch1, long n1)
+{
+	long i0 = 0, i1 = 0;
+
+	s->r = NULL;
+	s->n = s->cap = 0;
+	while (i0 < n0 || i1 < n1) {
+		if ((i0 < n0 && ch0[i0]) || (i1 < n1 && ch1[i1])) {
+			long s0 = i0, s1 = i1;
+			while (i0 < n0 && ch0[i0])
+				i0++;
+			while (i1 < n1 && ch1[i1])
+				i1++;
+			addrun(s, s0, i0 - s0, s1, i1 - s1);
+		} else {
+			i0++;
+			i1++;
+		}
+	}
+}
+
+/* Write one line exactly as it appeared in its file: bytes, then the newline
+ * only if the file had one there. */
+static void putline(const struct line *l)
+{
+	fwrite(l->p, 1, l->n, stdout);
+	if (l->nl)
+		putchar('\n');
+}
+
 int main(int argc, char **argv)
 {
 	struct file a, b;
 	struct eqtab t;
-	long *ea, *eb;
+	struct ctx c;
+	struct script sc;
+	long *ea, *eb, *fbuf, *bbuf, diags, i;
+	int minimal = 0, mode = 0;	/* 0 unified, 1 --stat, 2 --runs */
+	int ai = 1;
 
-	if (argc != 4 || strcmp(argv[1], "--stat") != 0) {
-		fprintf(stderr, "usage: %s --stat A B\n", prog);
+	for (; ai < argc && argv[ai][0] == '-' && argv[ai][1]; ai++) {
+		if (!strcmp(argv[ai], "--minimal") || !strcmp(argv[ai], "-d"))
+			minimal = 1;
+		else if (!strcmp(argv[ai], "--stat"))
+			mode = 1;
+		else if (!strcmp(argv[ai], "--runs"))
+			mode = 2;
+		else {
+			fprintf(stderr, "%s: unknown option %s\n", prog,
+			        argv[ai]);
+			return 2;
+		}
+	}
+	if (argc - ai != 2) {
+		fprintf(stderr,
+		        "usage: %s [--minimal] A B\n"
+		        "       %s --stat A B      line/class/changed counts\n"
+		        "       %s --runs A B      the raw edit script\n",
+		        prog, prog, prog);
 		return 2;
 	}
-	slurp(&a, argv[2]);
-	slurp(&b, argv[3]);
+	slurp(&a, argv[ai]);
+	slurp(&b, argv[ai + 1]);
+
 	eq_init(&t, a.n + b.n);
 	ea = classify(&t, &a);
 	eb = classify(&t, &b);
-	{
-		struct ctx c;
-		long diags = a.n + b.n + 3, i, n0 = 0, n1 = 0;
-		long *fbuf = xmalloc(sizeof *fbuf * (size_t)diags);
-		long *bbuf = xmalloc(sizeof *bbuf * (size_t)diags);
 
-		/* One slack slot at the front of each changed array: the
-		 * boundary normaliser added later reads index -1. */
-		c.ch0 = (char *)xcalloc((size_t)a.n + 2, 1) + 1;
-		c.ch1 = (char *)xcalloc((size_t)b.n + 2, 1) + 1;
-		c.xv = ea;
-		c.yv = eb;
-		c.fd = fbuf + b.n + 1;
-		c.bd = bbuf + b.n + 1;
-		c.heuristic = 1;
-		c.too_expensive = 1;
-		for (i = a.n + b.n; i != 0; i >>= 2)
-			c.too_expensive <<= 1;
-		if (c.too_expensive < 4096)
-			c.too_expensive = 4096;
+	diags = a.n + b.n + 3;
+	fbuf = xmalloc(sizeof *fbuf * (size_t)diags);
+	bbuf = xmalloc(sizeof *bbuf * (size_t)diags);
+	/* One slack slot at the front of each changed array: the boundary
+	 * normaliser reads index -1. */
+	c.ch0 = (char *)xcalloc((size_t)a.n + 2, 1) + 1;
+	c.ch1 = (char *)xcalloc((size_t)b.n + 2, 1) + 1;
+	c.xv = ea;
+	c.yv = eb;
+	c.fd = fbuf + b.n + 1;
+	c.bd = bbuf + b.n + 1;
+	c.heuristic = !minimal;
+	c.too_expensive = 1;
+	for (i = a.n + b.n; i != 0; i >>= 2)
+		c.too_expensive <<= 1;
+	if (c.too_expensive < 4096)
+		c.too_expensive = 4096;
 
-		compareseq(0, a.n, 0, b.n, 0, &c);
+	compareseq(0, a.n, 0, b.n, minimal, &c);
+
+	if (mode == 1) {
+		long n0 = 0, n1 = 0;
 		for (i = 0; i < a.n; i++)
 			n0 += c.ch0[i];
 		for (i = 0; i < b.n; i++)
 			n1 += c.ch1[i];
 		printf("lines %ld %ld classes %ld changed %ld %ld\n",
 		       a.n, b.n, t.nent, n0, n1);
+		return 0;
 	}
-	return 0;
+
+	build_script(&sc, c.ch0, a.n, c.ch1, b.n);
+
+	if (mode == 2) {
+		for (i = 0; i < sc.n; i++) {
+			long k;
+			fputs("@\n", stdout);
+			for (k = 0; k < sc.r[i].deleted; k++) {
+				putchar('-');
+				putline(&a.l[sc.r[i].line0 + k]);
+			}
+			for (k = 0; k < sc.r[i].inserted; k++) {
+				putchar('+');
+				putline(&b.l[sc.r[i].line1 + k]);
+			}
+		}
+		return sc.n ? 1 : 0;
+	}
+	return sc.n ? 1 : 0;
 }

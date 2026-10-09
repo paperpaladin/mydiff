@@ -16,8 +16,11 @@ rm -rf "$D"; mkdir -p "$D"
 
 pass=0; fail=0
 ok()  { pass=$((pass+1)); }
+# Cap the evidence: a 2000-line disagreement scrolls the actual failure list
+# off the screen, which is how a suite stops being read.
 bad() { fail=$((fail+1)); printf 'FAIL: %s\n' "$1"
-        [ $# -gt 1 ] && printf '%s\n' "$2" | sed 's/^/      | /'; }
+        [ $# -gt 1 ] && printf '%s\n' "$2" | head -20 | sed 's/^/      | /'
+        return 0; }
 
 # --- equivalence classes: `sort -u` is the authority on how many distinct
 # --- lines two files have between them.
@@ -88,6 +91,42 @@ changed "$D/big1" "$D/big2"
 awk 'BEGIN{for(i=1;i<=400;i++)print "aaa"i}' > "$D/dis1"
 awk 'BEGIN{for(i=1;i<=400;i++)print "bbb"i}' > "$D/dis2"
 changed "$D/dis1" "$D/dis2"
+
+# --- the edit script itself: where each run of changes starts and ends, and
+# --- that deletions come before insertions inside a run. GNU's line-group
+# --- formats will print exactly that, with no context, no hunk merging and no
+# --- line numbers, so this pins the script down before any formatting exists.
+# --- %L preserves a missing trailing newline, so that case is covered here too.
+runs() {
+	_w=$(diff --unchanged-line-format='' --old-line-format='-%L' \
+	          --new-line-format='+%L' --unchanged-group-format='' \
+	          --old-group-format='@
+%<' --new-group-format='@
+%>' --changed-group-format='@
+%<%>' "$1" "$2")
+	_g=$("$M" --runs "$1" "$2")
+	if [ "$_w" = "$_g" ]; then ok
+	else bad "runs $(basename "$1") $(basename "$2")" \
+	         "GNU:
+$_w
+ours:
+$_g"; fi
+}
+
+seq 1 20 > "$D/g1"
+sed -e '3c\
+X' -e '10,12d' -e '17a\
+Y' "$D/g1" > "$D/g2"
+printf 'a\nb' > "$D/nl1"; printf 'a\nc' > "$D/nl2"
+# c7/c8 is deliberately absent: the counts agree but the run placement does
+# not, because boundary normalisation does not exist yet. Added in the commit
+# that adds it.
+for p in "c1 c2" "c1 c1" "c4 c1" "c1 c4" "c4 c4" "c5 c6" "c6 c5" \
+         "c3 c5" "g1 g2" "g2 g1" "nl1 nl2" "nl1 nl1" "nl1 c1" \
+         "big1 big2" "dis1 dis2"; do
+	set -- $p
+	runs "$D/$1" "$D/$2"
+done
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" = 0 ]
