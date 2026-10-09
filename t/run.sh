@@ -98,8 +98,8 @@ changed "$D/dis1" "$D/dis2"
 # --- line numbers, so this pins the script down before any formatting exists.
 # --- %L preserves a missing trailing newline, so that case is covered here too.
 runs_gnu_default() {
-	diff --unchanged-line-format='' --old-line-format='-%L' \
-	     --new-line-format='+%L' --unchanged-group-format='' \
+	diff --unchanged-line-format='' --old-line-format='-%dn %L' \
+	     --new-line-format='+%dn %L' --unchanged-group-format='' \
 	     --old-group-format='@
 %<' --new-group-format='@
 %>' --changed-group-format='@
@@ -107,8 +107,8 @@ runs_gnu_default() {
 }
 
 runs_gnu_minimal() {
-	diff --minimal --unchanged-line-format='' --old-line-format='-%L' \
-	     --new-line-format='+%L' --unchanged-group-format='' \
+	diff --minimal --unchanged-line-format='' --old-line-format='-%dn %L' \
+	     --new-line-format='+%dn %L' --unchanged-group-format='' \
 	     --old-group-format='@
 %<' --new-group-format='@
 %>' --changed-group-format='@
@@ -284,6 +284,31 @@ for p in "c1 c2" "c1 c1" "c4 c1" "c1 c4" "c4 c4" "c5 c6" "c6 c5" "c3 c5" \
 	set -- $p
 	loop "$D/$1" "$D/$2"
 done
+
+# --- the corpus. 93 generated pairs, every one of them put to GNU diff three
+# --- ways: is our unified output the same bytes, does GNU patch accept it,
+# --- and do we accept GNU's. The agree/differ tally is printed separately
+# --- from the pass count, because "differs from GNU" is a fact worth a
+# --- number of its own.
+echo
+echo "corpus: $(python3 "$ROOT/t/gen.py" "$D/corpus") pairs"
+agree=0; differ=0
+for a in "$D"/corpus/*.a; do
+	b=${a%.a}.b
+	nm=$(basename "$a" .a)
+	diff -u "$a" "$b" > "$D/c.gnu"; gs=$?
+	"$M" "$a" "$b" > "$D/c.our"; os=$?
+	if cmp -s "$D/c.gnu" "$D/c.our" && [ "$gs" = "$os" ]; then
+		agree=$((agree+1)); ok
+	else
+		differ=$((differ+1))
+		bad "corpus-bytes $nm" "$(diff "$D/c.gnu" "$D/c.our" | head -12)
+exit status: GNU $gs, ours $os"
+	fi
+	loop "$a" "$b"
+done
+echo
+echo "$agree agree with GNU diff byte-for-byte, $differ differ"
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" = 0 ]

@@ -1,0 +1,197 @@
+#!/usr/bin/env python3
+"""Generate the test corpus: pairs of files chosen to hit code paths.
+
+Usage: gen.py DIR  -- writes DIR/NNN-name.a and DIR/NNN-name.b
+
+Nothing here records an expected diff. The expected answer always comes from
+GNU diffutils at run time; this only decides what to ask about. The cases are
+picked for where real diff implementations are known to disagree, not to look
+varied: the trailing-newline family is over-represented on purpose, and so are
+the degenerate sizes (0 and 1 lines), because that is where off-by-one errors
+in the @@ ranges live.
+"""
+import os
+import random
+import sys
+
+
+def main(outdir):
+    os.makedirs(outdir, exist_ok=True)
+    for f in os.listdir(outdir):
+        os.remove(os.path.join(outdir, f))
+    n = 0
+
+    def pair(name, a, b):
+        nonlocal n
+        n += 1
+        base = os.path.join(outdir, "%03d-%s" % (n, name))
+        with open(base + ".a", "w") as fh:
+            fh.write(a)
+        with open(base + ".b", "w") as fh:
+            fh.write(b)
+
+    def lines(xs):
+        return "".join(x + "\n" for x in xs)
+
+    rnd = random.Random(20261009)
+    base = ["line %d: %s" % (i, "x" * (i % 17)) for i in range(200)]
+
+    # --- the degenerate sizes, where @@ range arithmetic goes wrong
+    pair("both-empty", "", "")
+    pair("empty-to-one", "", "only\n")
+    pair("one-to-empty", "only\n", "")
+    pair("empty-to-many", "", lines(base[:40]))
+    pair("many-to-empty", lines(base[:40]), "")
+    pair("identical", lines(base), lines(base))
+    pair("one-line-change", "a\n", "b\n")
+    pair("blank-only", "\n", "\n\n\n")
+
+    # --- random line edits at three densities
+    for tag, nedits in (("sparse", 3), ("medium", 25), ("dense", 120)):
+        b = list(base)
+        for _ in range(nedits):
+            op = rnd.choice("idr")
+            if op == "i":
+                b.insert(rnd.randrange(len(b) + 1), "inserted %d" % rnd.randrange(1000))
+            elif op == "d" and b:
+                del b[rnd.randrange(len(b))]
+            elif b:
+                b[rnd.randrange(len(b))] = "replaced %d" % rnd.randrange(1000)
+        pair("edits-" + tag, lines(base), lines(b))
+
+    # --- insertions at the very head and the very tail. Both are where the
+    # --- context window has to clamp instead of running off the end.
+    pair("head-insert", lines(base), lines(["new head %d" % i for i in range(5)] + base))
+    pair("tail-insert", lines(base), lines(base + ["new tail %d" % i for i in range(5)]))
+    pair("head-delete", lines(base), lines(base[5:]))
+    pair("tail-delete", lines(base), lines(base[:-5]))
+    pair("head-and-tail", lines(base), lines(["h"] + base[1:-1] + ["t"]))
+    pair("one-line-file-head", "only\n", lines(["new", "only"]))
+    pair("one-line-file-tail", "only\n", lines(["only", "new"]))
+
+    # --- whole-file replacement, and the pathological no-shared-lines case
+    pair("whole-replace", lines(base), lines(["q %d" % i for i in range(200)]))
+    pair("disjoint-equal-size", lines(["aaa%d" % i for i in range(300)]),
+         lines(["bbb%d" % i for i in range(300)]))
+    pair("disjoint-lopsided", lines(["aaa%d" % i for i in range(400)]),
+         lines(["bbb%d" % i for i in range(7)]))
+
+    # --- no trailing newline, hard. Every combination of (last line same or
+    # --- different) x (A terminated or not) x (B terminated or not), plus the
+    # --- single-line and empty variants, because this is where real
+    # --- implementations diverge.
+    for atail in (True, False):
+        for btail in (True, False):
+            for samelast in (True, False):
+                a = lines(base[:20])
+                bb = list(base[:20])
+                if not samelast:
+                    bb[-1] = "changed last"
+                b = lines(bb)
+                if not atail:
+                    a = a[:-1]
+                if not btail:
+                    b = b[:-1]
+                pair("nonl-a%d-b%d-same%d" % (atail, btail, samelast), a, b)
+    pair("nonl-one-line", "x", "x\n")
+    pair("nonl-one-line-rev", "x\n", "x")
+    pair("nonl-empty", "", "x")
+    pair("nonl-only-newline-diff", lines(base[:30]), lines(base[:30])[:-1])
+    pair("nonl-both", lines(base[:30])[:-1], lines(base[:29] + ["other"])[:-1])
+    pair("nonl-context", lines(base[:30])[:-1],
+         lines(["changed"] + base[1:30])[:-1])
+
+    # --- very long lines
+    pair("long-lines",
+         lines(["%d:%s" % (i, "y" * 5000) for i in range(20)]),
+         lines(["%d:%s" % (i, "y" * 5000) for i in range(20)][:9]
+               + ["9:" + "z" * 5000]
+               + ["%d:%s" % (i, "y" * 5000) for i in range(10, 20)]))
+    pair("one-huge-line", "a" * 300000 + "\n", "a" * 150000 + "b" + "a" * 149999 + "\n")
+    pair("long-line-no-nl", "q" * 100000, "q" * 100000 + "\n")
+
+    # --- differing only in trailing whitespace, which a diff must treat as a
+    # --- real change (we have no -b/-w)
+    pair("trailing-space", lines(base[:30]),
+         lines([x + " " for x in base[:30]]))
+    pair("trailing-space-one", lines(base[:30]),
+         lines(base[:15] + [base[15] + "   "] + base[16:30]))
+    pair("trailing-tab", lines(base[:30]),
+         lines([x + "\t" for x in base[:30]]))
+    pair("cr-endings", lines(base[:30]), lines([x + "\r" for x in base[:30]]))
+
+    # --- 10000 lines, 50 scattered edits: D stays near 100 while N+M is
+    # --- 20000, which is the case Myers is actually for.
+    big = ["l%d" % i for i in range(10000)]
+    big2 = list(big)
+    for i in rnd.sample(range(10000), 50):
+        big2[i] = "EDITED %d" % i
+    pair("big-50-edits", lines(big), lines(big2))
+    big3 = list(big)
+    for i in sorted(rnd.sample(range(10000), 50), reverse=True):
+        del big3[i]
+    pair("big-50-deletes", lines(big), lines(big3))
+    big4 = list(big)
+    for i in sorted(rnd.sample(range(10000), 50), reverse=True):
+        big4.insert(i, "ADDED %d" % i)
+    pair("big-50-inserts", lines(big), lines(big4))
+
+    # --- a small alphabet, where many different minimal scripts exist and the
+    # --- boundary normaliser decides which one. This is the family that
+    # --- caught both shift_boundaries bugs.
+    for alpha in (2, 3, 7):
+        a = ["v%d" % rnd.randrange(alpha) for _ in range(300)]
+        b = list(a)
+        for _ in range(80):
+            op = rnd.choice("idr")
+            if op == "i":
+                b.insert(rnd.randrange(len(b) + 1), "v%d" % rnd.randrange(alpha))
+            elif op == "d" and b:
+                del b[rnd.randrange(len(b))]
+            elif b:
+                b[rnd.randrange(len(b))] = "v%d" % rnd.randrange(alpha)
+        pair("alphabet-%d" % alpha, lines(a), lines(b))
+
+    # --- repeated blocks, so the same text occurs at several offsets
+    blk = ["BEGIN", "body 1", "body 2", "END"]
+    pair("repeated-blocks", lines(blk * 20), lines(blk * 21))
+    pair("repeated-blocks-rev", lines(blk * 21), lines(blk * 20))
+    pair("moved-block", lines(base[:50]),
+         lines(base[10:20] + base[:10] + base[20:50]))
+
+    # --- a real file against itself with a patch applied: C source, which has
+    # --- the brace-and-blank-line repetition that trips naive heuristics
+    here = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..",
+                        "mydiff.c")
+    src = open(here).read().split("\n")
+    pair("self-source", "\n".join(src) + "\n",
+         "\n".join(src[:100] + ["/* inserted */"] + src[120:]) + "\n")
+    pair("self-source-shuffled", "\n".join(src) + "\n",
+         "\n".join(src[::-1]) + "\n")
+
+    # --- plain random pairs, to catch what the hand-picked cases do not
+    for i in range(40):
+        alpha = rnd.choice([2, 4, 10, 60, 500])
+        L = rnd.randrange(0, 150)
+        a = ["w%d" % rnd.randrange(alpha) for _ in range(L)]
+        b = list(a)
+        for _ in range(rnd.randrange(0, 30)):
+            op = rnd.choice("idr")
+            if op == "i":
+                b.insert(rnd.randrange(len(b) + 1), "w%d" % rnd.randrange(alpha))
+            elif op == "d" and b:
+                del b[rnd.randrange(len(b))]
+            elif b:
+                b[rnd.randrange(len(b))] = "w%d" % rnd.randrange(alpha)
+        sa, sb = lines(a), lines(b)
+        if rnd.random() < 0.3 and sa:
+            sa = sa[:-1]
+        if rnd.random() < 0.3 and sb:
+            sb = sb[:-1]
+        pair("random-%02d" % i, sa, sb)
+
+    print(n)
+
+
+if __name__ == "__main__":
+    main(sys.argv[1] if len(sys.argv) > 1 else "corpus")

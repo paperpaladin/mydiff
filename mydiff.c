@@ -474,6 +474,14 @@ static void compareseq(long xoff, long xlim, long yoff, long ylim,
  * distinction as buffered_lines (the middle) versus valid_lines (the whole
  * file), and losing it is a real bug with a one-line symptom: see the commit
  * that added this.
+ *
+ * The middle is not quite "everything that is not common", though: GNU leaves
+ * `context` lines of the common prefix and suffix inside it, so with -U3 a
+ * run can slide three lines further than with -U0. That is measurable from
+ * outside -- feed GNU an insertion into a run of identical lines next to the
+ * common tail and the reported line number moves by exactly N for -U N -- and
+ * it is the reason output depends on the context width in a way that looks at
+ * first like a bug in one of the two programs.
  */
 static void shift_one(char *changed, long i_end, const long *equivs,
                       const char *other_changed)
@@ -1001,19 +1009,22 @@ int main(int argc, char **argv)
 
 	/* The common prefix and suffix, computed the way GNU's
 	 * find_identical_ends does: prefix first, then suffix over what is
-	 * left, so the two cannot overlap. Normalisation is confined to the
-	 * middle. */
+	 * left, so the two cannot overlap. Then `keep` lines of each are
+	 * handed back, because GNU does that too. Normalisation is confined
+	 * to what remains. */
 	{
-		long pre = 0, suf = 0, lim;
+		long pre = 0, suf = 0, keep = mode == 0 ? context : 0;
 		while (pre < a.n && pre < b.n && ea[pre] == eb[pre])
 			pre++;
 		while (suf < a.n - pre && suf < b.n - pre
 		       && ea[a.n - 1 - suf] == eb[b.n - 1 - suf])
 			suf++;
-		lim = a.n - pre - suf;
-		shift_one(c.ch0 + pre, lim, ea + pre, c.ch1 + pre);
-		lim = b.n - pre - suf;
-		shift_one(c.ch1 + pre, lim, eb + pre, c.ch0 + pre);
+		pre -= pre < keep ? pre : keep;
+		suf -= suf < keep ? suf : keep;
+		shift_one(c.ch0 + pre, a.n - pre - suf, ea + pre,
+		          c.ch1 + pre);
+		shift_one(c.ch1 + pre, b.n - pre - suf, eb + pre,
+		          c.ch0 + pre);
 	}
 
 	if (mode == 1) {
@@ -1034,11 +1045,11 @@ int main(int argc, char **argv)
 			long k;
 			fputs("@\n", stdout);
 			for (k = 0; k < sc.r[i].deleted; k++) {
-				putchar('-');
+				printf("-%ld ", sc.r[i].line0 + k + 1);
 				putline(&a.l[sc.r[i].line0 + k]);
 			}
 			for (k = 0; k < sc.r[i].inserted; k++) {
-				putchar('+');
+				printf("+%ld ", sc.r[i].line1 + k + 1);
 				putline(&b.l[sc.r[i].line1 + k]);
 			}
 		}
