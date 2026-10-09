@@ -210,5 +210,27 @@ for n in 0 1 2 5 10; do
 	done
 done
 
+# --- patch parsing: re-printing every @@ header of a real `diff -U N` has to
+# --- reproduce those lines byte for byte. That catches a parser that drops a
+# --- field or silently defaults one, which is the failure mode that would
+# --- then apply a hunk at the wrong line. GNU omits a count of 1, so this
+# --- also pins the "@@ -1 +1 @@" spelling.
+hunks() {
+	diff -U "$1" "$2" "$3" > "$D/h.diff"
+	grep '^@@' "$D/h.diff" > "$D/h.want"
+	"$M" --hunks "$D/h.diff" > "$D/h.got"
+	if cmp -s "$D/h.want" "$D/h.got"; then ok
+	else bad "hunks -U$1 $(basename "$2") $(basename "$3")" \
+	         "$(diff "$D/h.want" "$D/h.got")"; fi
+}
+
+for n in 0 1 3 10; do
+	for p in "g1 g2" "c5 c6" "big1 big2" "s1 s2" "nn1 nn2" "c4 c1" \
+	         "dis1 dis2" "c7 c8"; do
+		set -- $p
+		hunks "$n" "$D/$1" "$D/$2"
+	done
+done
+
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" = 0 ]

@@ -726,6 +726,95 @@ static int print_unified(const struct file *a, const struct file *b,
 	return 1;
 }
 
+/* --- patch mode -----------------------------------------------------------
+ *
+ * `mydiff -p PATCH A` writes A with PATCH applied to stdout. This exists so
+ * the project closes the loop in both directions: GNU patch has to accept
+ * what we emit, and we have to accept what GNU diff emits.
+ *
+ * It is strict on purpose. No fuzz, no offset search, no reversed-patch
+ * detection, no file-renaming or multi-file patches: a hunk's context and
+ * deleted lines must match the original exactly, at exactly the line the
+ * header names, or we exit 2 and say which line disagreed. GNU patch's
+ * tolerance is a feature for humans applying stale patches by hand; here it
+ * would hide precisely the bugs the loop is meant to find, because a patch
+ * with the line numbers one off would still apply.
+ *
+ * shortcut: strict-only, single-file patches, and hunks must appear in
+ * increasing order. Upgrade path if this ever has to replace patch(1):
+ * fuzz and offset are a search over candidate positions around old_start,
+ * and multi-file support is a loop over "--- / +++" sections.
+ */
+static long hunkno(const char *p, const char *end, long *out)
+{
+	long v = 0;
+	const char *q = p;
+
+	if (q == end || *q < '0' || *q > '9')
+		return -1;
+	while (q < end && *q >= '0' && *q <= '9')
+		v = v * 10 + (*q++ - '0');
+	*out = v;
+	return (long)(q - p);
+}
+
+/* Parse "@@ -a[,b] +c[,d] @@" into its four numbers. Returns 0 on success. */
+static int parse_hunk_header(const struct line *l, long *a, long *b,
+                             long *c, long *d)
+{
+	const char *p = l->p, *end = l->p + l->n;
+	long k;
+
+	if (l->n < 4 || memcmp(p, "@@ -", 4) != 0)
+		return -1;
+	p += 4;
+	if ((k = hunkno(p, end, a)) < 0)
+		return -1;
+	p += k;
+	*b = 1;
+	if (p < end && *p == ',') {
+		p++;
+		if ((k = hunkno(p, end, b)) < 0)
+			return -1;
+		p += k;
+	}
+	if (p + 2 > end || p[0] != ' ' || p[1] != '+')
+		return -1;
+	p += 2;
+	if ((k = hunkno(p, end, c)) < 0)
+		return -1;
+	p += k;
+	*d = 1;
+	if (p < end && *p == ',') {
+		p++;
+		if ((k = hunkno(p, end, d)) < 0)
+			return -1;
+		p += k;
+	}
+	if (p + 2 > end || memcmp(p, " @", 2) != 0)
+		return -1;
+	return 0;
+}
+
+/* Re-print a parsed header in GNU's exact spelling: the count is omitted when
+ * it is 1. Used by --hunks, whose whole job is to be checkable: re-printing
+ * every @@ line of a real `diff -u` has to reproduce those lines byte for
+ * byte, which catches a parser that is quietly dropping or defaulting a
+ * field.
+ */
+static void print_hunk_header(long a, long b, long c, long d)
+{
+	fputs("@@ -", stdout);
+	printf("%ld", a);
+	if (b != 1)
+		printf(",%ld", b);
+	fputs(" +", stdout);
+	printf("%ld", c);
+	if (d != 1)
+		printf(",%ld", d);
+	fputs(" @@\n", stdout);
+}
+
 int main(int argc, char **argv)
 {
 	struct file a, b;
@@ -747,18 +836,39 @@ int main(int argc, char **argv)
 			mode = 1;
 		else if (!strcmp(argv[ai], "--runs"))
 			mode = 2;
+		else if (!strcmp(argv[ai], "--hunks"))
+			mode = 3;
 		else {
 			fprintf(stderr, "%s: unknown option %s\n", prog,
 			        argv[ai]);
 			return 2;
 		}
 	}
+	if (mode == 3) {
+		struct file pf;
+		long i;
+
+		if (argc - ai != 1) {
+			fprintf(stderr, "usage: %s --hunks PATCH\n", prog);
+			return 2;
+		}
+		slurp(&pf, argv[ai]);
+		for (i = 0; i < pf.n; i++) {
+			long ha, hb, hc, hd;
+			if (parse_hunk_header(&pf.l[i], &ha, &hb, &hc, &hd))
+				continue;
+			print_hunk_header(ha, hb, hc, hd);
+		}
+		return 0;
+	}
+
 	if (argc - ai != 2) {
 		fprintf(stderr,
 		        "usage: %s [-U N] [--minimal] A B\n"
 		        "       %s --stat A B      line/class/changed counts\n"
-		        "       %s --runs A B      the raw edit script\n",
-		        prog, prog, prog);
+		        "       %s --runs A B      the raw edit script\n"
+		        "       %s --hunks PATCH   re-print parsed @@ headers\n",
+		        prog, prog, prog, prog);
 		return 2;
 	}
 	slurp(&a, argv[ai]);
