@@ -1,0 +1,12 @@
+# build outputs
+mydiff
+mydiff-asan
+
+# test scratch (never /tmp: other agents share it)
+t/scratch/
+
+# editor / tooling debris
+*.o
+core
+vgcore.*
+compile_commands.json
