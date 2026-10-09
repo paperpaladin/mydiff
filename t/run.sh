@@ -97,6 +97,24 @@ changed "$D/dis1" "$D/dis2"
 # --- formats will print exactly that, with no context, no hunk merging and no
 # --- line numbers, so this pins the script down before any formatting exists.
 # --- %L preserves a missing trailing newline, so that case is covered here too.
+runs_gnu_default() {
+	diff --unchanged-line-format='' --old-line-format='-%L' \
+	     --new-line-format='+%L' --unchanged-group-format='' \
+	     --old-group-format='@
+%<' --new-group-format='@
+%>' --changed-group-format='@
+%<%>' "$1" "$2"
+}
+
+runs_gnu_minimal() {
+	diff --minimal --unchanged-line-format='' --old-line-format='-%L' \
+	     --new-line-format='+%L' --unchanged-group-format='' \
+	     --old-group-format='@
+%<' --new-group-format='@
+%>' --changed-group-format='@
+%<%>' "$1" "$2"
+}
+
 runs() {
 	_w=$(diff --unchanged-line-format='' --old-line-format='-%L' \
 	          --new-line-format='+%L' --unchanged-group-format='' \
@@ -118,14 +136,33 @@ sed -e '3c\
 X' -e '10,12d' -e '17a\
 Y' "$D/g1" > "$D/g2"
 printf 'a\nb' > "$D/nl1"; printf 'a\nc' > "$D/nl2"
-# c7/c8 is deliberately absent: the counts agree but the run placement does
-# not, because boundary normalisation does not exist yet. Added in the commit
-# that adds it.
 for p in "c1 c2" "c1 c1" "c4 c1" "c1 c4" "c4 c4" "c5 c6" "c6 c5" \
-         "c3 c5" "g1 g2" "g2 g1" "nl1 nl2" "nl1 nl1" "nl1 c1" \
-         "big1 big2" "dis1 dis2"; do
+         "c3 c5" "g1 g2" "g2 g1" "nl1 nl2" "nl1 nl1" \
+         "nl1 c1" "big1 big2" "dis1 dis2"; do
 	set -- $p
 	runs "$D/$1" "$D/$2"
+done
+
+# --- c7/c8 is the known divergence, asserted rather than skipped.
+# ---
+# --- 2000 lines over a 7-value alphabet, edit distance 2694. We agree with
+# --- `diff --minimal` byte for byte and disagree with plain `diff`, and plain
+# --- `diff` disagrees with its own --minimal. The cause is GNU's
+# --- discard_confusing_lines, which we do not implement; both answers cost
+# --- the same 1347+1347 lines, so this is a tie broken differently, not a
+# --- worse script. The assertion is all three facts at once, so that if any
+# --- of them changes -- including us accidentally starting to agree with the
+# --- default -- the suite says so instead of quietly passing.
+for p in "c7 c8" "c8 c7"; do
+	set -- $p
+	_gd=$(runs_gnu_default "$D/$1" "$D/$2")
+	_gm=$(runs_gnu_minimal "$D/$1" "$D/$2")
+	_o=$("$M" --runs "$D/$1" "$D/$2")
+	_om=$("$M" --minimal --runs "$D/$1" "$D/$2")
+	if [ "$_o" = "$_gm" ] && [ "$_o" = "$_om" ] && [ "$_gd" != "$_gm" ]
+	then ok
+	else bad "known-divergence $1 $2" \
+	         "expected ours == gnu --minimal != gnu default"; fi
 done
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"

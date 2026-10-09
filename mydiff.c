@@ -446,6 +446,100 @@ static void compareseq(long xoff, long xlim, long yoff, long ylim,
 	}
 }
 
+/* --- boundary normalisation -----------------------------------------------
+ *
+ * A shortest edit script is not unique, and the ambiguity is not academic:
+ * given
+ *      a        a
+ *      b        b
+ *      a   ->   a
+ *      b        b
+ *               a
+ *               b
+ * "insert a,b at the top" and "insert a,b at the bottom" are both minimal and
+ * the search picks whichever its tie-breaks lead to. GNU diff resolves this
+ * after the fact, by sliding each run of changes as far forward as the
+ * surrounding identical lines allow and merging runs that meet, then pulling
+ * back to line up with a changed run in the other file where one exists. The
+ * result is a canonical choice, and without it our output disagrees with
+ * GNU's on perfectly minimal scripts -- which is what the 2000-line
+ * small-alphabet fixture caught.
+ *
+ * This is diffutils' shift_boundaries, same structure, run once per file with
+ * the roles swapped. It reads changed[-1] and other_changed[-1], hence the
+ * slack slot at the front of both arrays.
+ *
+ * It is handed the *middle* of each file, with the common prefix and suffix
+ * cut off, because a run must not slide into the common tail. GNU keeps that
+ * distinction as buffered_lines (the middle) versus valid_lines (the whole
+ * file), and losing it is a real bug with a one-line symptom: see the commit
+ * that added this.
+ */
+static void shift_one(char *changed, long i_end, const long *equivs,
+                      const char *other_changed)
+{
+	long i = 0, j = 0;
+
+	for (;;) {
+		long runlength, start, corresponding;
+
+		/* Find the next run of changes, tracking the matching point
+		 * in the other file as we go. */
+		while (i < i_end && !changed[i]) {
+			while (other_changed[j++])
+				continue;
+			i++;
+		}
+		if (i == i_end)
+			break;
+		start = i;
+		while (changed[++i])
+			continue;
+		while (other_changed[j])
+			j++;
+
+		do {
+			runlength = i - start;
+
+			/* Slide back while the line before the run equals the
+			 * last line of it; this merges with earlier runs. */
+			while (start && equivs[start - 1] == equivs[i - 1]) {
+				changed[--start] = 1;
+				changed[--i] = 0;
+				while (changed[start - 1])
+					start--;
+				while (other_changed[--j])
+					continue;
+			}
+
+			/* Last position at which this run still lines up with
+			 * a changed run in the other file; i_end for none. */
+			corresponding = other_changed[j - 1] ? i : i_end;
+
+			/* Then slide forward as far as possible. Forward
+			 * second, so that with nothing to merge the run ends
+			 * up as late as the identical lines allow. */
+			while (i != i_end && equivs[start] == equivs[i]) {
+				changed[start++] = 0;
+				changed[i++] = 1;
+				while (changed[i])
+					i++;
+				while (other_changed[++j])
+					corresponding = i;
+			}
+		} while (runlength != i - start);
+
+		/* Having merged all it can, pull the run back to a
+		 * corresponding run in the other file if there was one. */
+		while (corresponding < i) {
+			changed[--start] = 1;
+			changed[--i] = 0;
+			while (other_changed[--j])
+				continue;
+		}
+	}
+}
+
 /* --- changed flags to an edit script --------------------------------------
  *
  * The two boolean arrays are a better representation than a list of edits,
@@ -566,6 +660,23 @@ int main(int argc, char **argv)
 		c.too_expensive = 4096;
 
 	compareseq(0, a.n, 0, b.n, minimal, &c);
+
+	/* The common prefix and suffix, computed the way GNU's
+	 * find_identical_ends does: prefix first, then suffix over what is
+	 * left, so the two cannot overlap. Normalisation is confined to the
+	 * middle. */
+	{
+		long pre = 0, suf = 0, lim;
+		while (pre < a.n && pre < b.n && ea[pre] == eb[pre])
+			pre++;
+		while (suf < a.n - pre && suf < b.n - pre
+		       && ea[a.n - 1 - suf] == eb[b.n - 1 - suf])
+			suf++;
+		lim = a.n - pre - suf;
+		shift_one(c.ch0 + pre, lim, ea + pre, c.ch1 + pre);
+		lim = b.n - pre - suf;
+		shift_one(c.ch1 + pre, lim, eb + pre, c.ch0 + pre);
+	}
 
 	if (mode == 1) {
 		long n0 = 0, n1 = 0;
