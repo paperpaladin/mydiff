@@ -176,11 +176,16 @@ exit status: GNU $_ws, ours $_gs"; fi
 }
 
 printf 'a\n' > "$D/s1"; printf 'b\n' > "$D/s2"
-# nl1/nl2 and friends are deliberately absent: the no-trailing-newline marker
-# does not exist yet and the next commit is the one that adds it.
+# Every combination of "ends with a newline" that matters, on purpose. nn1 is
+# a one-line file with no newline, nn2 the same text with one; c1/c7 differ
+# only in the final newline of the last line; nl1/nl2 both lack it and differ
+# in the last line, which is the case where the marker has to appear twice.
+printf 'a' > "$D/nn1"; printf 'a\n' > "$D/nn2"
+printf 'a\nb\nc' > "$D/nn3"
 for p in "c1 c2" "c1 c1" "c4 c1" "c1 c4" "c4 c4" "c5 c6" "c6 c5" \
          "c3 c5" "g1 g2" "g2 g1" "s1 s2" "s1 s1" "s1 c1" "big1 big2" \
-         "dis1 dis2"; do
+         "dis1 dis2" "nn1 nn2" "nn2 nn1" "nn1 nn1" "nl1 nl2" "nl2 nl1" \
+         "nn3 c1" "c1 nn3" "nn3 nn3" "c4 nn1" "nn1 c4" "nn3 c5"; do
 	set -- $p
 	uni "$D/$1" "$D/$2"
 done

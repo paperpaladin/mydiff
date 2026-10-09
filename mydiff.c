@@ -595,12 +595,24 @@ static void build_script(struct script *s, const char *ch0, long n0,
 }
 
 /* Write one line exactly as it appeared in its file: bytes, then the newline
- * only if the file had one there. */
+ * only if the file had one there. This is what GNU's %L line format does. */
 static void putline(const struct line *l)
 {
 	fwrite(l->p, 1, l->n, stdout);
 	if (l->nl)
 		putchar('\n');
+}
+
+/* Write one line into a diff. A diff is itself line-oriented, so a line that
+ * had no newline in its file still gets one here -- followed by the marker
+ * that says so. Without this the next line's +/-/space prefix is glued onto
+ * the end of this one and the diff is unparseable. */
+static void putdiffline(const struct line *l)
+{
+	fwrite(l->p, 1, l->n, stdout);
+	putchar('\n');
+	if (!l->nl)
+		fputs("\\ No newline at end of file\n", stdout);
 }
 
 /* --- unified output -------------------------------------------------------
@@ -695,17 +707,17 @@ static int print_unified(const struct file *a, const struct file *b,
 		while (i <= last0 || j <= last1) {
 			if (k > e || i < sc->r[k].line0) {
 				putchar(' ');
-				putline(&a->l[i++]);
+				putdiffline(&a->l[i++]);
 				j++;
 			} else {
 				long n;
 				for (n = sc->r[k].deleted; n--;) {
 					putchar('-');
-					putline(&a->l[i++]);
+					putdiffline(&a->l[i++]);
 				}
 				for (n = sc->r[k].inserted; n--;) {
 					putchar('+');
-					putline(&b->l[j++]);
+					putdiffline(&b->l[j++]);
 				}
 				k++;
 			}
