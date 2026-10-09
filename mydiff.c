@@ -115,16 +115,92 @@ static void slurp(struct file *f, const char *name)
 	}
 }
 
+/* --- line equivalence classes ---------------------------------------------
+ *
+ * Myers compares elements, not strings. Hashing every line of both files into
+ * a dense class id up front turns the inner loop comparison into an int
+ * compare, which matters because that loop runs O((N+M)D) times. Equal class
+ * id means equal line; the numeric values are meaningless and nothing may
+ * depend on their order.
+ */
+struct eqtab {
+	long *slot;		/* open addressing: index into ent[], or -1 */
+	size_t mask;
+	struct line *ent;
+	long nent;
+};
+
+static size_t linehash(const struct line *l)
+{
+	size_t h = 1469598103934665603u;	/* FNV-1a 64 */
+	size_t i;
+	for (i = 0; i < l->n; i++) {
+		h ^= (unsigned char)l->p[i];
+		h *= 1099511628211u;
+	}
+	/* The nl flag is part of the identity, not metadata: "a" and "a\n"
+	 * are different lines and must land in different classes. */
+	h ^= (size_t)l->nl + 1;
+	h *= 1099511628211u;
+	return h;
+}
+
+static int lineeq(const struct line *x, const struct line *y)
+{
+	return x->nl == y->nl && x->n == y->n && memcmp(x->p, y->p, x->n) == 0;
+}
+
+static void eq_init(struct eqtab *t, long cap)
+{
+	size_t sz = 16;
+	while ((long)sz < cap * 2 + 2)
+		sz *= 2;
+	t->mask = sz - 1;
+	t->slot = xmalloc(sizeof *t->slot * sz);
+	memset(t->slot, 0xff, sizeof *t->slot * sz);
+	t->ent = xmalloc(sizeof *t->ent * (size_t)(cap + 1));
+	t->nent = 0;
+}
+
+static long eq_id(struct eqtab *t, const struct line *l)
+{
+	size_t i = linehash(l) & t->mask;
+	while (t->slot[i] >= 0) {
+		if (lineeq(&t->ent[t->slot[i]], l))
+			return t->slot[i];
+		i = (i + 1) & t->mask;
+	}
+	t->ent[t->nent] = *l;
+	t->slot[i] = t->nent;
+	return t->nent++;
+}
+
+/* equivs[i] is the class of line i. */
+static long *classify(struct eqtab *t, const struct file *f)
+{
+	long *e = xmalloc(sizeof *e * (size_t)(f->n + 1));
+	long i;
+	for (i = 0; i < f->n; i++)
+		e[i] = eq_id(t, &f->l[i]);
+	return e;
+}
+
 int main(int argc, char **argv)
 {
 	struct file a, b;
+	struct eqtab t;
+	long *ea, *eb;
 
-	if (argc != 3) {
-		fprintf(stderr, "usage: %s A B\n", prog);
+	if (argc != 4 || strcmp(argv[1], "--stat") != 0) {
+		fprintf(stderr, "usage: %s --stat A B\n", prog);
 		return 2;
 	}
-	slurp(&a, argv[1]);
-	slurp(&b, argv[2]);
-	printf("%ld %ld\n", a.n, b.n);
+	slurp(&a, argv[2]);
+	slurp(&b, argv[3]);
+	eq_init(&t, a.n + b.n);
+	ea = classify(&t, &a);
+	eb = classify(&t, &b);
+	(void)ea; (void)eb;
+	printf("lines %ld %ld classes %ld\n", a.n, b.n, t.nent);
 	return 0;
 }
