@@ -14,6 +14,67 @@ ROOT=$(cd "$(dirname "$0")/.." && pwd)
 D=$ROOT/t/scratch/$(basename "$M")
 rm -rf "$D"; mkdir -p "$D"
 
+# --- benchmark mode: t/run.sh --bench [binary]. Separate from the suite
+# --- because it measures rather than asserts.
+if [ "${1:-}" = "--bench" ]; then
+	shift
+	M=${1:-./mydiff}
+	case $M in /*) ;; *) M="$PWD/$M" ;; esac
+	ROOT=$(cd "$(dirname "$0")/.." && pwd)
+	BD=$ROOT/t/scratch/bench
+	python3 "$ROOT/t/gen.py" "$BD" --bench > /dev/null
+
+	# Five runs each, best-of reported, output to /dev/null so neither
+	# program is charged for terminal I/O. Both are asked for the same
+	# thing: a unified diff with three lines of context.
+	timeit() {
+		_best=999999999
+		for _i in 1 2 3 4 5; do
+			_t0=$(date +%s%N)
+			"$@" > /dev/null 2>&1
+			_t1=$(date +%s%N)
+			_d=$(( (_t1 - _t0) / 1000000 ))
+			[ "$_d" -lt "$_best" ] && _best=$_d
+		done
+		printf '%s' "$_best"
+	}
+
+	# How many times slower we are than GNU diff. Above 1.00 we lose.
+	ratio() { awk "BEGIN{printf \"%.2fx\", ($2>0)?($1/$2):0}"; }
+
+	echo "edit distance at fixed size (20000 lines each side)"
+	printf '%10s %12s %12s %8s\n' D mydiff_ms diff_ms ratio
+	for f in "$BD"/d-*.a; do
+		d=$(basename "$f" .a); d=${d#d-}
+		mt=$(timeit "$M" "$f" "${f%.a}.b")
+		gt=$(timeit diff -u "$f" "${f%.a}.b")
+		printf '%10s %12s %12s %8s\n' \
+		    "$(echo "$d" | sed 's/^0*//')" "$mt" "$gt" "$(ratio "$mt" "$gt")"
+	done
+	echo
+	echo "file size at fixed edit distance (100 edits)"
+	printf '%10s %12s %12s %8s\n' lines mydiff_ms diff_ms ratio
+	for f in "$BD"/n-*.a; do
+		n=$(basename "$f" .a); n=${n#n-}
+		mt=$(timeit "$M" "$f" "${f%.a}.b")
+		gt=$(timeit diff -u "$f" "${f%.a}.b")
+		printf '%10s %12s %12s %8s\n' \
+		    "$(echo "$n" | sed 's/^0*//')" "$mt" "$gt" "$(ratio "$mt" "$gt")"
+	done
+	echo
+	echo "like for like at large D: both sides forced minimal, so the"
+	echo "comparison is of the same algorithm and not of GNU's heuristics"
+	printf '%10s %12s %12s %8s\n' D mydiff_ms diff_ms ratio
+	for f in "$BD"/d-010000.a "$BD"/d-020000.a; do
+		d=$(basename "$f" .a); d=${d#d-}
+		mt=$(timeit "$M" --minimal "$f" "${f%.a}.b")
+		gt=$(timeit diff --minimal -u "$f" "${f%.a}.b")
+		printf '%10s %12s %12s %8s\n' \
+		    "$(echo "$d" | sed 's/^0*//')" "$mt" "$gt" "$(ratio "$mt" "$gt")"
+	done
+	exit 0
+fi
+
 pass=0; fail=0
 ok()  { pass=$((pass+1)); }
 # Cap the evidence: a 2000-line disagreement scrolls the actual failure list

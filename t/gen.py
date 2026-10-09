@@ -54,6 +54,43 @@ def fuzz(outdir, count):
     print(count)
 
 
+def bench(outdir):
+    """Pairs for the benchmark: edit distance varied at fixed file size, then
+    file size varied at fixed edit distance. Myers is O((N+M)D), so the first
+    series should grow roughly linearly in D and the second roughly linearly
+    in N -- the point being that D, not file size, is what costs."""
+    os.makedirs(outdir, exist_ok=True)
+    for f in os.listdir(outdir):
+        os.remove(os.path.join(outdir, f))
+    rnd = random.Random(1)
+
+    def write(name, a, b):
+        with open(os.path.join(outdir, name + ".a"), "w") as fh:
+            fh.write("".join(x + "\n" for x in a))
+        with open(os.path.join(outdir, name + ".b"), "w") as fh:
+            fh.write("".join(x + "\n" for x in b))
+
+    N = 20000
+    base = ["line %d of a file that looks a bit like source" % i
+            for i in range(N)]
+    # D series: k replacements costs 2k edits, scattered so no two are
+    # adjacent and the edit distance really is 2k.
+    for k in (1, 10, 100, 1000, 5000, 10000):
+        b = list(base)
+        for i in rnd.sample(range(N), k):
+            b[i] = "EDITED %d" % i
+        write("d-%06d" % (2 * k), base, b)
+    # N series: 50 edits regardless of size.
+    for n in (1000, 5000, 20000, 100000, 400000):
+        a = base[:n] if n <= N else ["line %d of a file that looks a bit "
+                                     "like source" % i for i in range(n)]
+        b = list(a)
+        for i in rnd.sample(range(n), min(50, n)):
+            b[i] = "EDITED %d" % i
+        write("n-%06d" % n, a, b)
+    print("ok")
+
+
 def main(outdir):
     os.makedirs(outdir, exist_ok=True)
     for f in os.listdir(outdir):
@@ -233,7 +270,9 @@ def main(outdir):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) > 3 and sys.argv[2] == "--fuzz":
+    if len(sys.argv) > 2 and sys.argv[2] == "--bench":
+        bench(sys.argv[1])
+    elif len(sys.argv) > 3 and sys.argv[2] == "--fuzz":
         fuzz(sys.argv[1], int(sys.argv[3]))
     else:
         main(sys.argv[1] if len(sys.argv) > 1 else "corpus")
