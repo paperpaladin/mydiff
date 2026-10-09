@@ -928,10 +928,16 @@ int main(int argc, char **argv)
 	int ai = 1;
 
 	for (; ai < argc && argv[ai][0] == '-' && argv[ai][1]; ai++) {
-		if (!strcmp(argv[ai], "-U") && ai + 1 < argc) {
+		/* GNU accepts -U3, -U 3 and --unified=3 interchangeably, and
+		 * so must we: the suite drives us with whatever string it
+		 * drove diff with, and `-U0` failing as an unknown option
+		 * while `-U 0` worked was a real trap. */
+		if (!strncmp(argv[ai], "-U", 2) && argv[ai][2]) {
+			context = strtol(argv[ai] + 2, NULL, 10);
+		} else if (!strncmp(argv[ai], "--unified=", 10)) {
+			context = strtol(argv[ai] + 10, NULL, 10);
+		} else if (!strcmp(argv[ai], "-U") && ai + 1 < argc) {
 			context = strtol(argv[++ai], NULL, 10);
-			if (context < 0)
-				context = 0;
 		} else if (!strcmp(argv[ai], "--minimal") || !strcmp(argv[ai], "-d"))
 			minimal = 1;
 		else if (!strcmp(argv[ai], "--stat"))
@@ -947,6 +953,8 @@ int main(int argc, char **argv)
 			        argv[ai]);
 			return 2;
 		}
+		if (context < 0)
+			context = 0;
 	}
 	if (mode == 4) {
 		struct file pf, of;
@@ -980,7 +988,7 @@ int main(int argc, char **argv)
 
 	if (argc - ai != 2) {
 		fprintf(stderr,
-		        "usage: %s [-U N] [--minimal] A B\n"
+		        "usage: %s [-U N|-UN|--unified=N] [--minimal] A B\n"
 		        "       %s --stat A B      line/class/changed counts\n"
 		        "       %s --runs A B      the raw edit script\n"
 		        "       %s --hunks PATCH   re-print parsed @@ headers\n"

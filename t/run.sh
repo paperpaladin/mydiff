@@ -271,6 +271,17 @@ for n in 0 1 2 5 10; do
 	done
 done
 
+# The three spellings GNU accepts must all mean the same thing. "-U0" used to
+# be an unknown option here while "-U 0" worked, which is the kind of gap that
+# makes a harness quietly test something other than what it meant to.
+diff -U2 "$D/g1" "$D/g2" > "$D/s.want"
+for form in "-U2" "-U 2" "--unified=2"; do
+	# shellcheck disable=SC2086
+	"$M" $form "$D/g1" "$D/g2" > "$D/s.got"
+	if cmp -s "$D/s.want" "$D/s.got"; then ok
+	else bad "spelling [$form]" "$(diff "$D/s.want" "$D/s.got")"; fi
+done
+
 # --- patch parsing: re-printing every @@ header of a real `diff -U N` has to
 # --- reproduce those lines byte for byte. That catches a parser that drops a
 # --- field or silently defaults one, which is the failure mode that would
