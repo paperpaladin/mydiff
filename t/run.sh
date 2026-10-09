@@ -232,5 +232,58 @@ for n in 0 1 3 10; do
 	done
 done
 
+# --- the closed loop, in both directions and against two independent tools.
+# ---   1. GNU patch applied to OUR diff must reproduce B from A.
+# ---   2. OUR -p applied to GNU's diff must reproduce B from A.
+# ---   3. OUR -p applied to our own diff must too -- the weakest of the
+# ---      three, since both halves are ours and a shared misreading passes.
+loop() {
+	_n="$(basename "$1") $(basename "$2")"
+
+	# 1. GNU patch reads what we write.
+	"$M" "$1" "$2" > "$D/l.our"
+	if [ -s "$D/l.our" ]; then
+		cp "$1" "$D/l.work"
+		if patch -s -F0 --no-backup-if-mismatch "$D/l.work" \
+		         < "$D/l.our" 2> "$D/l.err"; then
+			# patch removes a file it has emptied, which is not a
+			# failure when B is in fact empty.
+			[ -f "$D/l.work" ] || : > "$D/l.work"
+			if cmp -s "$D/l.work" "$2"; then ok
+			else bad "patch(ours) $_n" "result != B"; fi
+		else
+			bad "patch(ours) $_n" "$(cat "$D/l.err")"
+		fi
+	else
+		if cmp -s "$1" "$2"; then ok
+		else bad "patch(ours) $_n" "we printed nothing but A != B"; fi
+	fi
+
+	# 2. We read what GNU writes.
+	diff -u "$1" "$2" > "$D/l.gnu"
+	if "$M" -p "$D/l.gnu" "$1" > "$D/l.out" 2> "$D/l.err"; then
+		if cmp -s "$D/l.out" "$2"; then ok
+		else bad "ours-p(gnu) $_n" "$(diff "$D/l.out" "$2" | head -6)"; fi
+	else
+		bad "ours-p(gnu) $_n" "$(cat "$D/l.err")"
+	fi
+
+	# 3. Self round-trip.
+	if "$M" -p "$D/l.our" "$1" > "$D/l.out" 2> "$D/l.err"; then
+		if cmp -s "$D/l.out" "$2"; then ok
+		else bad "ours-p(ours) $_n" "$(diff "$D/l.out" "$2" | head -6)"; fi
+	else
+		bad "ours-p(ours) $_n" "$(cat "$D/l.err")"
+	fi
+}
+
+for p in "c1 c2" "c1 c1" "c4 c1" "c1 c4" "c4 c4" "c5 c6" "c6 c5" "c3 c5" \
+         "g1 g2" "g2 g1" "s1 s2" "s1 c1" "big1 big2" "dis1 dis2" \
+         "c7 c8" "nn1 nn2" "nn2 nn1" "nl1 nl2" "nl2 nl1" "nn3 c1" \
+         "c1 nn3" "c4 nn1" "nn1 c4" "nn3 c5"; do
+	set -- $p
+	loop "$D/$1" "$D/$2"
+done
+
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" = 0 ]

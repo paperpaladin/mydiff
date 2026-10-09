@@ -815,6 +815,92 @@ static void print_hunk_header(long a, long b, long c, long d)
 	fputs(" @@\n", stdout);
 }
 
+/* Apply PATCH to ORIG, writing the result to stdout. Returns 0 on success,
+ * 2 if the patch does not fit. */
+static int apply(const struct file *pf, const struct file *orig)
+{
+	long cur = 0, i = 0;
+	long lastend = 0;
+
+	while (i < pf->n) {
+		long ha, hb, hc, hd, start, oldleft, newleft;
+
+		if (parse_hunk_header(&pf->l[i], &ha, &hb, &hc, &hd)) {
+			i++;	/* headers, junk, trailing text: skipped */
+			continue;
+		}
+		i++;
+		/* A zero-length old range names the line *before* the
+		 * insertion point, so it is already the 0-based index. */
+		start = hb == 0 ? ha : ha - 1;
+		if (start < lastend || start > orig->n) {
+			fprintf(stderr,
+			        "%s: hunk at @@ -%ld,%ld wants line %ld, "
+			        "out of order or past end of %s (%ld lines)\n",
+			        prog, ha, hb, start + 1, orig->name, orig->n);
+			return 2;
+		}
+		while (cur < start)
+			putline(&orig->l[cur++]);
+
+		oldleft = hb;
+		newleft = hd;
+		while ((oldleft > 0 || newleft > 0) && i < pf->n) {
+			struct line body;
+			char tag;
+
+			tag = pf->l[i].n ? pf->l[i].p[0] : ' ';
+			if (tag == '\\') {	/* "\ No newline..." */
+				i++;
+				continue;
+			}
+			if (tag != ' ' && tag != '-' && tag != '+')
+				break;
+			body.p = pf->l[i].p + (pf->l[i].n ? 1 : 0);
+			body.n = pf->l[i].n ? pf->l[i].n - 1 : 0;
+			/* A patch line always ends with a newline; whether the
+			 * *file* line does is said by a following marker. */
+			body.nl = 1;
+			if (i + 1 < pf->n && pf->l[i + 1].n
+			    && pf->l[i + 1].p[0] == '\\')
+				body.nl = 0;
+			i++;
+
+			if (tag == '+') {
+				if (newleft-- <= 0)
+					goto botch;
+				putline(&body);
+				continue;
+			}
+			if (oldleft-- <= 0)
+				goto botch;
+			if (tag == ' ' && newleft-- <= 0)
+				goto botch;
+			if (cur >= orig->n || !lineeq(&orig->l[cur], &body)) {
+				fprintf(stderr,
+				        "%s: hunk at @@ -%ld,%ld does not "
+				        "apply: %s line %ld is not %.*s\n",
+				        prog, ha, hb, orig->name, cur + 1,
+				        (int)body.n, body.p);
+				return 2;
+			}
+			if (tag == ' ')
+				putline(&orig->l[cur]);
+			cur++;
+		}
+		if (oldleft || newleft) {
+botch:
+			fprintf(stderr, "%s: hunk at @@ -%ld,%ld is "
+			        "truncated or miscounted\n", prog, ha, hb);
+			return 2;
+		}
+		lastend = cur;
+	}
+	while (cur < orig->n)
+		putline(&orig->l[cur++]);
+	return 0;
+}
+
 int main(int argc, char **argv)
 {
 	struct file a, b;
@@ -838,12 +924,26 @@ int main(int argc, char **argv)
 			mode = 2;
 		else if (!strcmp(argv[ai], "--hunks"))
 			mode = 3;
+		else if (!strcmp(argv[ai], "-p"))
+			mode = 4;
 		else {
 			fprintf(stderr, "%s: unknown option %s\n", prog,
 			        argv[ai]);
 			return 2;
 		}
 	}
+	if (mode == 4) {
+		struct file pf, of;
+
+		if (argc - ai != 2) {
+			fprintf(stderr, "usage: %s -p PATCH ORIG\n", prog);
+			return 2;
+		}
+		slurp(&pf, argv[ai]);
+		slurp(&of, argv[ai + 1]);
+		return apply(&pf, &of);
+	}
+
 	if (mode == 3) {
 		struct file pf;
 		long i;
@@ -867,8 +967,9 @@ int main(int argc, char **argv)
 		        "usage: %s [-U N] [--minimal] A B\n"
 		        "       %s --stat A B      line/class/changed counts\n"
 		        "       %s --runs A B      the raw edit script\n"
-		        "       %s --hunks PATCH   re-print parsed @@ headers\n",
-		        prog, prog, prog, prog);
+		        "       %s --hunks PATCH   re-print parsed @@ headers\n"
+		        "       %s -p PATCH ORIG   apply PATCH, result to "
+		        "stdout\n", prog, prog, prog, prog, prog);
 		return 2;
 	}
 	slurp(&a, argv[ai]);
