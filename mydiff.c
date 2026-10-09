@@ -752,6 +752,14 @@ static int print_unified(const struct file *a, const struct file *b,
  * increasing order. Upgrade path if this ever has to replace patch(1):
  * fuzz and offset are a search over candidate positions around old_start,
  * and multi-file support is a loop over "--- / +++" sections.
+ *
+ * shortcut: output is streamed to stdout as hunks are applied, so a patch
+ * that fails on its third hunk leaves the first two hunks' worth of lines
+ * already written. The exit status is 2 and the caller must throw the
+ * output away. Upgrade path: buffer the result and write it only on
+ * success, which costs one copy of the file in memory -- cheap, but it
+ * also loses the ability to pipe a patched file larger than RAM, so it is
+ * not obviously the better trade.
  */
 static long hunkno(const char *p, const char *end, long *out)
 {
