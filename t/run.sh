@@ -12,6 +12,27 @@ ROOT=$(cd "$(dirname "$0")/.." && pwd)
 
 # Scratch lives under the repo, keyed on the binary, never in /tmp.
 D=$ROOT/t/scratch/$(basename "$M")
+
+# Every invocation below goes through a wrapper that bounds it in time, by
+# pointing $M at the wrapper rather than by editing thirty-two call sites.
+#
+# Termination is a property a diff algorithm has to have, and the way it
+# fails is not a wrong answer but a process that never comes back -- at which
+# point this suite stops too and the number it was about to print never
+# appears. That happened: an earlier build recursed on an inverted range and
+# spun, the run was killed from outside, and the orphaned child held a core
+# at 99% for fifteen hours before anyone noticed. A bound turns all of that
+# into one FAIL line. 30s is about a hundred times the slowest case here.
+M_TIMEOUT=${M_TIMEOUT:-30}
+_REAL_M=$(cd "$(dirname "$M")" && pwd)/$(basename "$M")
+_WRAPDIR=$(mktemp -d)      # not under $D: the suite wipes that
+trap 'rm -rf "$_WRAPDIR"' EXIT
+cat > "$_WRAPDIR/mydiff" <<WRAP
+#!/bin/sh
+exec timeout $M_TIMEOUT "$_REAL_M" "\$@"
+WRAP
+chmod +x "$_WRAPDIR/mydiff"
+M=$_WRAPDIR/mydiff
 rm -rf "$D"; mkdir -p "$D"
 
 # --- benchmark mode: t/run.sh --bench [binary]. Separate from the suite

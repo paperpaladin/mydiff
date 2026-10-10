@@ -439,6 +439,30 @@ static void compareseq(long xoff, long xlim, long yoff, long ylim,
 	} else {
 		struct part part;
 		diag(xoff, xlim, yoff, ylim, find_minimal, &part, c);
+
+		/* A split point outside the range it splits is always wrong, and
+		 * the failure it causes is the worst kind: both halves of the
+		 * recursion get an inverted range, diag() scans one without a
+		 * bound, and the process simply never returns.  Observed once,
+		 * for real -- compareseq(xlim=51, ylim=-169) from a parent with
+		 * ylim=35 -- after an orphaned run had held a core at 99% for
+		 * fifteen hours.  The suite had reported 995 passed throughout,
+		 * because it never waited on that invocation.
+		 *
+		 * Not reproducible from the inputs on disk, so this is not a fix
+		 * and is not dressed up as one.  It converts an unbounded hang
+		 * into an immediate, located abort, which is the difference
+		 * between a bug that can be chased and one that cannot. */
+		if (part.xmid < xoff || part.xmid > xlim ||
+		    part.ymid < yoff || part.ymid > ylim) {
+			fprintf(stderr,
+			    "mydiff: internal error: split (%ld,%ld) outside "
+			    "x[%ld,%ld] y[%ld,%ld]\n",
+			    (long)part.xmid, (long)part.ymid,
+			    (long)xoff, (long)xlim, (long)yoff, (long)ylim);
+			exit(3);
+		}
+
 		compareseq(xoff, part.xmid, yoff, part.ymid,
 		           part.lo_minimal, c);
 		compareseq(part.xmid, xlim, part.ymid, ylim,

@@ -108,6 +108,50 @@ control we have over them:
 - **Character encodings.** A line is bytes. No CRLF normalisation, no
   Unicode-aware comparison.
 
+## A hang observed once, and not reproduced
+
+On 2026-10-10 a `mydiff --stat` process was found holding a core at 99% for
+fifteen hours and twenty-one minutes. The backtrace before killing it:
+
+```
+compareseq (xlim=51, ylim=-169)      <- from compareseq(xlim=223, ylim=35)
+```
+
+`ylim = -169` against a `yoff` of 0. `compareseq` recurses on
+`(xoff, part.xmid, yoff, part.ymid)`, so `diag()` returned a split point
+below the bottom of the range it was splitting. Both halves then get an
+inverted range, `diag()` scans one without a bound, and it never returns.
+
+**Not reproduced, and not claimed as fixed.** The process started at 11:16,
+three commits before the code that exists now, and its inputs are
+deterministic (`awk srand(7)` and `srand(9)`) and complete in under a second
+against the current binary. It was most likely fixed by one of 31e7ac9,
+bb6313d or ae52337 and never cleaned up: its parent run was killed from
+outside, and the child was reparented and forgotten.
+
+What was wrong regardless is that nothing noticed for fifteen hours. Two
+things were added, both about what the next occurrence costs:
+
+1. `compareseq` checks that the split point lies inside the range it splits
+   and aborts with the numbers if not. A split outside its own range is
+   wrong under every input, reproducible or not, and the check is two
+   comparisons per level.
+2. Every invocation in `t/run.sh` is bounded (`M_TIMEOUT`, default 30s,
+   roughly a hundred times the slowest case) by pointing `$M` at a wrapper
+   rather than editing thirty-two call sites -- so anything added later is
+   covered without having to remember.
+
+Both were checked by planting the failure rather than by reasoning:
+`part.ymid = yoff - 1` gives `split (500,-1) outside x[0,500] y[0,501]`, and
+a binary that sleeps forever gives exit 124 at the bound.
+
+The wrapper lives in a `mktemp` directory, not in `t/scratch`, because the
+suite wipes that -- the first version put it there and 1339 assertions
+failed against a binary deleted out from under them.
+
+Termination is a property a diff algorithm has to have. This suite tested
+every answer the program gives and never once tested that it gives one.
+
 ## Commit sequence
 
 - [x] Read two files and split them into lines, GNU's way
