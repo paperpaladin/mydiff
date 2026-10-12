@@ -402,6 +402,17 @@ exit status: GNU $gs, ours $os"
 done
 echo
 echo "$agree agree with GNU diff byte-for-byte, $differ differ"
+# The verdict for this family is `bad` per differing pair, so zero pairs is
+# zero failures: a gen.py that emitted nothing would print "corpus: 0 pairs",
+# agree 0, differ 0, and pass. The corpus is generated here rather than
+# vendored, so it cannot go missing -- but it can shrink, and nothing was
+# watching the number. 93 is what t/gen.py produces; it moves when gen.py
+# does, in the same commit.
+if [ "$((agree + differ))" -eq 93 ]; then
+	ok
+else
+	bad "corpus size" "t/gen.py produced $((agree + differ)) pairs, expected 93"
+fi
 
 # --- the adversarial family, kept separate because the two claims about it
 # --- are different strengths.

@@ -22,7 +22,7 @@ fuzz: 400 adversarial pairs
 of the 12, 12 are GNU disagreeing with its own
 --minimal (discard_confusing_lines) and 0 are unexplained
 
-995 passed, 0 failed
+996 passed, 0 failed
 ```
 
 `make test-asan` runs the same 995 checks under
