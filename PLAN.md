@@ -39,8 +39,7 @@ Not "equivalent output", not "the same modulo formatting": the same bytes,
 headers and mtime timestamps included, so there is nothing to normalise away
 before comparing. Myers' algorithm produces a minimal edit script and GNU
 diffutils implements the same algorithm, so exact agreement is achievable and
-any disagreement is a real difference in behaviour, not a formatting
-preference.
+any disagreement is a real difference in behaviour and never a formatting preference.
 
 Where that invariant does not hold, it holds against `diff -u --minimal`
 instead, and the suite proves that the gap is GNU disagreeing with itself,
