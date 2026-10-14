@@ -187,7 +187,7 @@ every answer the program gives and never once tested that it gives one.
       why: four spellings of the same header, and a parser that defaults the
       wrong field applies hunks at the wrong line silently.
 - [x] Apply a unified diff
-      why: closes the loop in both directions, which is the point of the
+      why: closes the loop in both directions, the point of the
       project: two reference tools checking each other through us.
 - [x] The 93-pair corpus
       why: the cases where implementations actually diverge, generated rather
