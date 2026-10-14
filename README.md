@@ -188,8 +188,7 @@ comparison is of the same algorithm and not of GNU's heuristics
 ```
 
 The claim holds: between D=2 and D=2000 the time barely moves, because the
-whole 9ms is the fixed cost of reading and hashing 1.8MB. The `(N+M)D` term
-only becomes visible past D=10000, where it goes quadratic-ish as expected.
+whole 9ms is the fixed cost of reading and hashing 1.8MB. That `(N+M)D` term only becomes visible past D=10000, where it goes quadratic-ish as expected.
 
 Where we lose, and the part worth reading. Against plain `diff` at
 D=20000 we are 48 times slower. That number is almost entirely GNU's
