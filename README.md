@@ -53,7 +53,7 @@ isolation.
 
 ## Why the oracle is unusually good here
 
-Most reimplementations can only be checked loosely: you can test that a
+Most reimplementations can only be checked loosely. You can test that a
 decompressor round-trips, or that a parser accepts valid input, but
 "byte-identical to the reference" is usually off the table because formatting
 is a matter of taste. Diff is different. Myers' algorithm produces a *minimal*
@@ -226,7 +226,7 @@ Scratch files go in `t/scratch/`, under the repo, never `/tmp`. The suite
 keys that directory on the binary name so `make test` and `make test-asan`
 can run at the same time.
 
-`detect_leaks=0` is set for `test-asan`, deliberately: this program reads two
+`detect_leaks=0` is set for `test-asan`, deliberately. This program reads two
 files, writes a diff and exits, so nothing is freed and LeakSanitizer reports
 every allocation in it. Eight per run, all live until exit, drowning out the
 bounds findings that are the reason to run ASan at all.
