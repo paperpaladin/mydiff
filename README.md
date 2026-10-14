@@ -86,7 +86,7 @@ simply absent.
 
 We differ from `diff -u`'s default output on a measurable class of inputs.
 GNU diff, by default, runs `discard_confusing_lines` before comparing: it
-throws away lines it judges unhelpful, which is a heuristic and which changes
+throws away lines it judges unhelpful, a heuristic, and one that changes
 *which* of several equally short edit scripts comes out. This program does not
 implement it. The consequence, measured, not guessed:
 
@@ -140,7 +140,7 @@ and two frontier arrays sized N+M. 400000 lines is comfortable; a file larger
 than RAM will not work and there is no streaming mode.
 
 A line is bytes. No CRLF normalisation: a file with `\r\n` endings
-differs from the same file with `\n` endings on every line, which is what
+differs from the same file with `\n` endings on every line, the thing
 `diff` also reports. No character-encoding awareness of any kind. Trailing
 whitespace is a real difference, since there is no `-b`.
 
@@ -191,7 +191,7 @@ The claim holds: between D=2 and D=2000 the time barely moves, because the
 whole 9ms is the fixed cost of reading and hashing 1.8MB. The `(N+M)D` term
 only becomes visible past D=10000, where it goes quadratic-ish as expected.
 
-Where we lose, which is the part worth reading. Against plain `diff` at
+Where we lose, and the part worth reading. Against plain `diff` at
 D=20000 we are 48 times slower. That number is almost entirely GNU's
 heuristics and almost nothing to do with the algorithm: force both programs
 to compute a genuinely minimal script and the same case closes to 1.22x. GNU
