@@ -96,6 +96,20 @@ if [ "${1:-}" = "--bench" ]; then
 	exit 0
 fi
 
+# Every claim in this file is a claim about what GNU diffutils, GNU patch or
+# python3 printed. Without them there is nothing to compare against, and a
+# run that quietly checked nothing would still print a pass count. Refuse,
+# loudly, naming what is missing.
+missing=
+for tool in diff patch python3; do
+	command -v "$tool" > /dev/null 2>&1 || missing="$missing $tool"
+done
+if [ -n "$missing" ]; then
+	printf 'SKIP: the oracle is not installed:%s\n' "$missing" >&2
+	printf 'SKIP: nothing was checked. This is not a pass.\n' >&2
+	exit 2
+fi
+
 pass=0; fail=0
 ok()  { pass=$((pass+1)); }
 # Cap the evidence: a 2000-line disagreement scrolls the actual failure list
@@ -173,6 +187,24 @@ changed "$D/big1" "$D/big2"
 awk 'BEGIN{for(i=1;i<=400;i++)print "aaa"i}' > "$D/dis1"
 awk 'BEGIN{for(i=1;i<=400;i++)print "bbb"i}' > "$D/dis2"
 changed "$D/dis1" "$D/dis2"
+# 6000 distinct lines against a permutation of themselves. Every line
+# matches exactly one line on the other side, so discard_confusing_lines
+# throws nothing away and the edit distance stays near 2N. That is the only
+# input here that drives a single diag() call past too_expensive (4096) and
+# so reaches the bailout that returns a deliberately non-minimal split.
+# Nothing in this suite reached that path before: the bench pairs do, and
+# they were timed and never compared, which is how `mydiff` came to disagree
+# with `diff -u` by one line on the 20000-line bench pair without anything
+# noticing. 6000 is the size: at 3000 the search finishes under the
+# threshold and the path is not reached.
+python3 -c 'import random
+r = random.Random(11)
+a = ["uniq%d" % i for i in range(6000)]
+b = a[:]
+r.shuffle(b)
+open("'"$D"'/perm1", "w").write("".join(x + chr(10) for x in a))
+open("'"$D"'/perm2", "w").write("".join(x + chr(10) for x in b))'
+changed "$D/perm1" "$D/perm2"
 
 # --- the edit script itself: where each run of changes starts and ends, and
 # --- that deletions come before insertions inside a run. GNU's line-group
@@ -216,32 +248,40 @@ Y' "$D/g1" > "$D/g2"
 printf 'a\nb' > "$D/nl1"; printf 'a\nc' > "$D/nl2"
 for p in "c1 c2" "c1 c1" "c4 c1" "c1 c4" "c4 c4" "c5 c6" "c6 c5" \
          "c3 c5" "g1 g2" "g2 g1" "nl1 nl2" "nl1 nl1" \
-         "nl1 c1" "big1 big2" "dis1 dis2"; do
+         "nl1 c1" "big1 big2" "dis1 dis2" "perm1 perm2"; do
 	set -- $p
 	runs "$D/$1" "$D/$2"
 done
 
-# --- c7/c8 is the known divergence, asserted rather than skipped.
+# --- c7/c8 is where GNU's two answers differ, and it is now asserted from
+# --- both ends rather than measured.
 # ---
-# --- 2000 lines over a 7-value alphabet, edit distance 2694. We agree with
-# --- `diff --minimal` byte for byte and disagree with plain `diff`, and plain
-# --- `diff` disagrees with its own --minimal. The cause is GNU's
-# --- discard_confusing_lines, which we do not implement; both answers cost
-# --- the same 1347+1347 lines, so this is a tie broken differently, not a
-# --- worse script. The assertion is all three facts at once, so that if any
-# --- of them changes -- including us accidentally starting to agree with the
-# --- default -- the suite says so instead of quietly passing.
+# --- 2000 lines over a 7-value alphabet, edit distance 2694. GNU's default
+# --- output and its own --minimal output are different scripts of the same
+# --- cost, because by default GNU runs discard_confusing_lines first and
+# --- that changes which of the equally short scripts comes out. We now
+# --- implement it, so we have to match BOTH: the default with the discarding
+# --- on, --minimal with it off.
+# ---
+# --- The third assertion, that GNU still disagrees with itself here, is the
+# --- one that keeps the other two honest. It is what makes this pair able to
+# --- tell the two code paths apart at all: with the discard pass unwired our
+# --- default output would silently become our --minimal output, still equal
+# --- to `diff --minimal` and no longer equal to `diff`. Remove the call and
+# --- this case goes red, which is the point of it.
 for p in "c7 c8" "c8 c7"; do
 	set -- $p
 	runs_gnu_default "$D/$1" "$D/$2" > "$D/k.gd"
 	runs_gnu_minimal "$D/$1" "$D/$2" > "$D/k.gm"
 	"$M" --runs "$D/$1" "$D/$2" > "$D/k.o"
 	"$M" --minimal --runs "$D/$1" "$D/$2" > "$D/k.om"
-	if cmp -s "$D/k.o" "$D/k.gm" && cmp -s "$D/k.o" "$D/k.om" \
+	if cmp -s "$D/k.o" "$D/k.gd" && cmp -s "$D/k.om" "$D/k.gm" \
 	   && ! cmp -s "$D/k.gd" "$D/k.gm"
 	then ok
-	else bad "known-divergence $1 $2" \
-	         "expected ours == gnu --minimal != gnu default"; fi
+	else bad "two-answers $1 $2" \
+	         "ours default vs gnu default: $(cmp "$D/k.o" "$D/k.gd" 2>&1)
+ours minimal vs gnu minimal: $(cmp "$D/k.om" "$D/k.gm" 2>&1)
+gnu default vs gnu minimal: $(cmp "$D/k.gd" "$D/k.gm" 2>&1) (must differ)"; fi
 done
 
 # --- unified output, the real bar: byte for byte against `diff -u`, headers
@@ -267,7 +307,8 @@ printf 'a\nb\nc' > "$D/nn3"
 for p in "c1 c2" "c1 c1" "c4 c1" "c1 c4" "c4 c4" "c5 c6" "c6 c5" \
          "c3 c5" "g1 g2" "g2 g1" "s1 s2" "s1 s1" "s1 c1" "big1 big2" \
          "dis1 dis2" "nn1 nn2" "nn2 nn1" "nn1 nn1" "nl1 nl2" "nl2 nl1" \
-         "nn3 c1" "c1 nn3" "nn3 nn3" "c4 nn1" "nn1 c4" "nn3 c5"; do
+         "nn3 c1" "c1 nn3" "nn3 nn3" "c4 nn1" "nn1 c4" "nn3 c5" \
+         "perm1 perm2" "perm2 perm1"; do
 	set -- $p
 	uni "$D/$1" "$D/$2"
 done
@@ -373,7 +414,7 @@ loop() {
 for p in "c1 c2" "c1 c1" "c4 c1" "c1 c4" "c4 c4" "c5 c6" "c6 c5" "c3 c5" \
          "g1 g2" "g2 g1" "s1 s2" "s1 c1" "big1 big2" "dis1 dis2" \
          "c7 c8" "nn1 nn2" "nn2 nn1" "nl1 nl2" "nl2 nl1" "nn3 c1" \
-         "c1 nn3" "c4 nn1" "nn1 c4" "nn3 c5"; do
+         "c1 nn3" "c4 nn1" "nn1 c4" "nn3 c5" "perm1 perm2"; do
 	set -- $p
 	loop "$D/$1" "$D/$2"
 done
@@ -414,22 +455,31 @@ else
 	bad "corpus size" "t/gen.py produced $((agree + differ)) pairs, expected 93"
 fi
 
-# --- the adversarial family, kept separate because the two claims about it
-# --- are different strengths.
+# --- the adversarial family, now asserted against both of GNU's answers.
 # ---
 # --- On inputs drawn from a 1-to-3 symbol line alphabet there are many
 # --- distinct minimal edit scripts and only the boundary normaliser decides
-# --- between them. It is also the only family where GNU diff's *default*
-# --- output differs from its own --minimal output, because of
-# --- discard_confusing_lines, which we do not implement. So:
-# ---   hard assertion: we equal `diff --minimal -U N` on every pair. A
-# ---     failure here is a bug in us.
-# ---   measurement: how many also equal plain `diff -U N`. The shortfall is
-# ---     GNU choosing a different tie-break, and the suite proves that by
-# ---     checking GNU's own two answers also differ on exactly those pairs.
+# --- between them. It is also the family where GNU diff's *default* output
+# --- differs from its own --minimal output, because by default GNU discards
+# --- confusing lines before comparing. Both are hard assertions now:
+# ---   `mydiff -U N`           == `diff -U N`            (discarding on)
+# ---   `mydiff --minimal -U N` == `diff --minimal -U N`  (discarding off)
+# --- Until the discard pass existed only the second one could be made, and
+# --- the first was a measurement that stood at 388 of 400. It is kept as a
+# --- measurement as well as an assertion, because the printed number is what
+# --- says how much of the gap is left, and it must now print 400 and 0.
+# ---
+# --- A diff that matches GNU can still be a diff that does not apply, so
+# --- each pair also goes through GNU patch: our output, fed to an
+# --- independent program, has to turn A back into B. That is the property
+# --- the byte comparison does not check, and this family is where our new
+# --- code path chooses the hunks.
 echo
 echo "fuzz: $(python3 "$ROOT/t/gen.py" "$D/fuzz" --fuzz 400) adversarial pairs"
-fagree=0; fdiffer=0; fbogus=0
+# 400 of those are the small-alphabet pairs; gen.py adds 100 more built
+# to make long runs of discardable lines, which is what reaches the
+# inner rules of discard_confusing_lines. The count below is the total.
+fagree=0; fdiffer=0
 for a in "$D"/fuzz/*.a; do
 	b=${a%.a}.b
 	nm=$(basename "$a" .a)
@@ -437,28 +487,84 @@ for a in "$D"/fuzz/*.a; do
 	diff --minimal -U "$u" "$a" "$b" > "$D/f.min"
 	diff -U "$u" "$a" "$b" > "$D/f.def"
 	"$M" -U "$u" "$a" "$b" > "$D/f.our"
-	if cmp -s "$D/f.min" "$D/f.our"; then
+	"$M" --minimal -U "$u" "$a" "$b" > "$D/f.ourmin"
+	if cmp -s "$D/f.min" "$D/f.ourmin"; then
 		ok
 	else
-		bad "fuzz-minimal $nm" "$(diff "$D/f.min" "$D/f.our" | head -12)"
+		bad "fuzz-minimal $nm" "$(diff "$D/f.min" "$D/f.ourmin" | head -12)"
 	fi
 	if cmp -s "$D/f.def" "$D/f.our"; then
-		fagree=$((fagree+1))
+		fagree=$((fagree+1)); ok
 	else
 		fdiffer=$((fdiffer+1))
-		# The shortfall must be GNU disagreeing with itself. If GNU's
-		# default and --minimal agree and we still differ, that is a
-		# bug in us wearing a disguise.
-		if cmp -s "$D/f.def" "$D/f.min"; then
-			fbogus=$((fbogus+1))
-			bad "fuzz-unexplained $nm" \
-			    "GNU default == GNU --minimal, yet we differ"
+		bad "fuzz-default $nm" "$(diff "$D/f.def" "$D/f.our" | head -12)"
+	fi
+	# Reconstruction: GNU patch applied to what we just wrote must
+	# produce B. Empty output is only correct when A and B are equal.
+	if [ -s "$D/f.our" ]; then
+		cp "$a" "$D/f.work"
+		if patch -s -F0 --no-backup-if-mismatch "$D/f.work" \
+		         < "$D/f.our" 2> "$D/f.err"; then
+			[ -f "$D/f.work" ] || : > "$D/f.work"
+			if cmp -s "$D/f.work" "$b"; then ok
+			else bad "fuzz-apply $nm" "patched A != B"; fi
+		else
+			bad "fuzz-apply $nm" "$(cat "$D/f.err")"
 		fi
+	else
+		if cmp -s "$a" "$b"; then ok
+		else bad "fuzz-apply $nm" "we printed nothing but A != B"; fi
 	fi
 done
 echo "$fagree agree with plain \`diff -U N\`, $fdiffer differ"
-echo "of the $fdiffer, $((fdiffer-fbogus)) are GNU disagreeing with its own"
-echo "--minimal (discard_confusing_lines) and $fbogus are unexplained"
+if [ "$((fagree + fdiffer))" -eq 500 ]; then
+	ok
+else
+	bad "fuzz size" "t/gen.py produced $((fagree + fdiffer)) pairs, expected 500"
+fi
+
+# --- the sanitizer's own blind spot, checked instead of assumed.
+# ---
+# --- A buffer larger than its data turns ASan off over that buffer: a read
+# --- one past the end of the undiscarded sequence lands inside the next
+# --- live allocation and nothing is reported. GNU packs all four of those
+# --- arrays into one block; we allocate four and realloc each down to the
+# --- length actually used, for this reason alone, and the only way to know
+# --- the realloc is load-bearing is to plant the over-read and watch.
+# ---
+# --- Measured when this was added: the planted read trips ASan on 96 of the
+# --- 500 fuzz pairs with the trim in place, and on 0 of 500 with the four
+# --- arrays packed into one block. The second number is what a clean ASan
+# --- run looks like when it is checking nothing.
+# ---
+# --- Only under `make test-asan`, which is where a compiler and the
+# --- sanitizer flags are already in hand.
+if [ -n "${MYDIFF_ASAN:-}" ]; then
+	sed 's/x < xlim \&\& y < ylim/x <= xlim \&\& y <= ylim/' \
+		"$ROOT/mydiff.c" > "$D/overread.c"
+	if ! cmp -s "$ROOT/mydiff.c" "$D/overread.c" \
+	   && ${CC:-gcc} $ASAN_CFLAGS -o "$D/overread" "$D/overread.c" \
+	        2> "$D/overread.cc.err"; then
+		seen=0
+		for a in "$D"/fuzz/*.a; do
+			nm=$(basename "$a" .a)
+			ASAN_OPTIONS=exitcode=86:detect_leaks=0 \
+			    "$D/overread" -U "${nm##*-U}" "$a" "${a%.a}.b" \
+			    > /dev/null 2> "$D/overread.err"
+			if [ $? = 86 ]; then seen=1; break; fi
+		done
+		if [ "$seen" = 1 ]; then ok
+		else bad "asan-sees-overread" \
+		         "a read past the end of the undiscarded sequence was
+not reported on any of 500 pairs. Either the arrays are
+packed into one allocation again, or the sed below no
+longer matches the snake loop it is meant to break."; fi
+	else
+		bad "asan-sees-overread" \
+		    "could not build the planted over-read:
+$(cat "$D/overread.cc.err" 2>/dev/null)"
+	fi
+fi
 
 # --- fail-closed. Everything above checks that we agree with GNU when the
 # --- input is good; nothing checked that we refuse bad input instead of

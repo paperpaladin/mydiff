@@ -193,6 +193,183 @@ static long *classify(struct eqtab *t, const struct file *f)
 	return e;
 }
 
+/* --- discarding confusing lines ------------------------------------------
+ *
+ * GNU diff does not run the comparison over the lines of the two files. It
+ * throws some of them away first: a line that matches nothing at all in the
+ * other file is an insertion or a deletion whatever the rest of the script
+ * does, and a line that matches very many is noise that drags the search
+ * around. What survives is compared; what was discarded is marked changed on
+ * the spot.
+ *
+ * This is a heuristic and the thresholds are somebody's taste, not a
+ * derivation: "five times the square root of the line count", "cancel a
+ * subrun of MINIMUM or more", "three nonprovisionals in a row", "at least 8
+ * lines in". So the code below is a copy of diffutils' analyze.c, structure
+ * and constants together, and what it buys is agreement with `diff -u`. It
+ * does not buy a shorter edit script: where the two answers differ they cost
+ * the same number of edits, and the discarding one can only be longer, never
+ * shorter, than the minimal script `--minimal` still produces.
+ *
+ * One line of GNU's is deliberately absent. Its marking loop begins
+ * `if (equivs[i] == 0) continue;`, which exempts the lines that -I or -B
+ * told it to ignore: those are given class 0 there and no real line ever has
+ * it. We have neither option and our class 0 is an ordinary class, the first
+ * line hashed, so copying that test would exempt an arbitrary line from the
+ * heuristic. Dropping it is the faithful translation, not a shortcut.
+ */
+
+/* Mark each line of one file: 1 for "matches nothing on the other side",
+ * 2 for "matches so many that it is probably noise", which is provisional
+ * and may be taken back below. COUNTS is the other file's per-class count. */
+static void mark_discards(char *discards, const long *equivs, long end,
+                          const long *counts)
+{
+	long i, many = 5, tem = end / 64;
+
+	/* MANY ends up as 5 times roughly the square root of END. */
+	while ((tem >>= 2) > 0)
+		many *= 2;
+	for (i = 0; i < end; i++) {
+		long nmatch = counts[equivs[i]];
+		if (nmatch == 0)
+			discards[i] = 1;
+		else if (nmatch > many)
+			discards[i] = 2;
+	}
+}
+
+/* Keep a provisional discard only where it sits inside a run of discardable
+ * lines that both begins and ends with a definite one, and then only under
+ * the four further conditions GNU applies to the inside of such a run. */
+static void cancel_provisional(char *discards, long end)
+{
+	long i;
+
+	for (i = 0; i < end; i++) {
+		long j, length, provisional = 0;
+
+		/* A provisional discard outside any run of discards goes. */
+		if (discards[i] == 2) {
+			discards[i] = 0;
+			continue;
+		}
+		if (discards[i] == 0)
+			continue;
+
+		/* A definite discard: find the end of its run, counting the
+		 * provisionals in it. */
+		for (j = i; j < end; j++) {
+			if (discards[j] == 0)
+				break;
+			if (discards[j] == 2)
+				provisional++;
+		}
+		/* Cancel provisionals at the end, shrinking the run, so that
+		 * it is definite at both ends. */
+		while (j > i && discards[j - 1] == 2) {
+			discards[--j] = 0;
+			provisional--;
+		}
+		length = j - i;
+
+		if (provisional * 4 > length) {
+			/* A quarter of the run is provisional: trust none
+			 * of them. */
+			while (j > i)
+				if (discards[--j] == 2)
+					discards[j] = 0;
+		} else {
+			long consec, minimum = 1, tem = length >> 2;
+
+			/* MINIMUM is roughly the square root of LENGTH/4,
+			 * plus one: a subrun of two or more provisionals can
+			 * stand once LENGTH reaches 16, of four or more once
+			 * it reaches 64. */
+			while ((tem >>= 2) > 0)
+				minimum <<= 1;
+			minimum++;
+
+			/* Cancel any subrun of MINIMUM or more provisionals
+			 * inside the larger run. */
+			for (j = 0, consec = 0; j < length; j++)
+				if (discards[i + j] != 2)
+					consec = 0;
+				else if (minimum == ++consec)
+					j -= consec;	/* back up and redo */
+				else if (minimum < consec)
+					discards[i + j] = 0;
+
+			/* From the start of the run, cancel provisionals
+			 * until three definite discards in a row, or the
+			 * first definite one at least 8 lines in. */
+			for (j = 0, consec = 0; j < length; j++) {
+				if (j >= 8 && discards[i + j] == 1)
+					break;
+				if (discards[i + j] == 2) {
+					consec = 0;
+					discards[i + j] = 0;
+				} else if (discards[i + j] == 0)
+					consec = 0;
+				else
+					consec++;
+				if (consec == 3)
+					break;
+			}
+
+			i += length - 1;	/* I is the run's last line */
+
+			/* The same, backwards from the end of the run. */
+			for (j = 0, consec = 0; j < length; j++) {
+				if (j >= 8 && discards[i - j] == 1)
+					break;
+				if (discards[i - j] == 2) {
+					consec = 0;
+					discards[i - j] = 0;
+				} else if (discards[i - j] == 0)
+					consec = 0;
+				else
+					consec++;
+				if (consec == 3)
+					break;
+			}
+		}
+	}
+}
+
+/* Shrink an array to exactly the part of it that is used.
+ *
+ * Not a tidiness measure. The undiscarded sequences are allocated for the
+ * case where nothing is discarded, so after discarding they are buffers
+ * larger than their data, and a read one past the end of one lands inside
+ * the same live allocation where no sanitizer can see it. Three repositories
+ * in this collection have had a bounds bug hidden exactly that way. One
+ * realloc each buys the coverage back, and t/run.sh keeps it honest. */
+static long *trim(long *p, long n)
+{
+	long *q = realloc(p, sizeof *p * (size_t)(n > 0 ? n : 1));
+	return q ? q : p;
+}
+
+/* Build the sequence the comparison will actually see, and the map from a
+ * position in it back to a line of the file. Every discarded line is marked
+ * changed here and is never considered again. Returns the length. */
+static long apply_discards(const char *discards, const long *equivs, long end,
+                           long *undiscarded, long *realindexes, char *changed)
+{
+	long i, j = 0;
+
+	for (i = 0; i < end; i++) {
+		if (discards[i] == 0) {
+			undiscarded[j] = equivs[i];
+			realindexes[j++] = i;
+		} else {
+			changed[i] = 1;
+		}
+	}
+	return j;
+}
+
 /* --- the D-path search ----------------------------------------------------
  *
  * Myers 1986. Two breadth-first searches are run over the edit graph at once,
@@ -220,7 +397,8 @@ struct part {
 struct ctx {
 	const long *xv, *yv;	/* equivalence classes of each file */
 	long *fd, *bd;		/* furthest-reaching paths, indexable < 0 */
-	char *ch0, *ch1;	/* output: per-line changed flags */
+	char *ch0, *ch1;	/* output: per-line changed flags, middle only */
+	const long *ri0, *ri1;	/* undiscarded index -> line within the middle */
 	int heuristic;
 	long too_expensive;
 };
@@ -312,14 +490,27 @@ static void diag(long xoff, long xlim, long yoff, long ylim, int find_minimal,
 		if (find_minimal)
 			continue;
 
-		/* shortcut: the two heuristics below are GNU diff's, and they
-		 * are the reason `diff` without --minimal can return a
-		 * non-minimal script. They are here only because matching
-		 * GNU's default output byte for byte is the project's bar.
-		 * Both are off under --minimal. Upgrade path, if the exactness
-		 * ever stops mattering: delete them and keep --minimal
-		 * behaviour always, which costs time on large files with many
-		 * changes and nothing else. */
+		/* The two heuristics below are GNU diff's, and they are the
+		 * reason `diff` without --minimal can return a non-minimal
+		 * script. They are here only because matching GNU's default
+		 * output byte for byte is the project's bar. Both are off
+		 * under --minimal.
+		 *
+		 * shortcut: this first one, the big-snake shortcut, is dead
+		 * code. GNU gates it on `speed_large_files`, which only
+		 * `-H` sets, and -H is not an option here, so c->heuristic is
+		 * always 0 and this block never runs. It was reached until
+		 * this commit, because the flag was wired to !minimal, which
+		 * is not what GNU does: that made us take a non-minimal
+		 * shortcut on inputs where GNU would not, and a diff of two
+		 * 20000-line files with 2000 edits was measured firing it
+		 * eight times. Upgrade path: implement -H, with `diff -H -u`
+		 * as its oracle, and set c->heuristic from it. Until then the
+		 * block is kept rather than deleted because it is GNU's code
+		 * for that flag and nothing else wants the space.
+		 *
+		 * The too_expensive bailout below it is NOT gated this way,
+		 * in GNU either: it runs by default and it does fire here. */
 		if (cost > 200 && big_snake && c->heuristic) {
 			long best = 0;
 
@@ -432,10 +623,10 @@ static void compareseq(long xoff, long xlim, long yoff, long ylim,
 
 	if (xoff == xlim) {
 		while (yoff < ylim)
-			c->ch1[yoff++] = 1;
+			c->ch1[c->ri1[yoff++]] = 1;
 	} else if (yoff == ylim) {
 		while (xoff < xlim)
-			c->ch0[xoff++] = 1;
+			c->ch0[c->ri0[xoff++]] = 1;
 	} else {
 		struct part part;
 		diag(xoff, xlim, yoff, ylim, find_minimal, &part, c);
@@ -948,6 +1139,9 @@ int main(int argc, char **argv)
 	struct ctx c;
 	struct script sc;
 	long *ea, *eb, *fbuf, *bbuf, diags, i;
+	long *un0, *un1, *ri0, *ri1;	/* the undiscarded lines and their map */
+	long nun0, nun1, pre = 0, suf = 0, mid0, mid1;
+	char *ch0, *ch1;		/* changed flags, indexed by real line */
 	int minimal = 0, mode = 0;	/* 0 unified, 1 --stat, 2 --runs */
 	int ai = 1;
 
@@ -1027,33 +1221,25 @@ int main(int argc, char **argv)
 	ea = classify(&t, &a);
 	eb = classify(&t, &b);
 
-	diags = a.n + b.n + 3;
-	fbuf = xmalloc(sizeof *fbuf * (size_t)diags);
-	bbuf = xmalloc(sizeof *bbuf * (size_t)diags);
 	/* One slack slot at the front of each changed array: the boundary
 	 * normaliser reads index -1. */
-	c.ch0 = (char *)xcalloc((size_t)a.n + 2, 1) + 1;
-	c.ch1 = (char *)xcalloc((size_t)b.n + 2, 1) + 1;
-	c.xv = ea;
-	c.yv = eb;
-	c.fd = fbuf + b.n + 1;
-	c.bd = bbuf + b.n + 1;
-	c.heuristic = !minimal;
-	c.too_expensive = 1;
-	for (i = a.n + b.n; i != 0; i >>= 2)
-		c.too_expensive <<= 1;
-	if (c.too_expensive < 4096)
-		c.too_expensive = 4096;
-
-	compareseq(0, a.n, 0, b.n, minimal, &c);
+	ch0 = (char *)xcalloc((size_t)a.n + 2, 1) + 1;
+	ch1 = (char *)xcalloc((size_t)b.n + 2, 1) + 1;
 
 	/* The common prefix and suffix, computed the way GNU's
 	 * find_identical_ends does: prefix first, then suffix over what is
 	 * left, so the two cannot overlap. Then `keep` lines of each are
-	 * handed back, because GNU does that too. Normalisation is confined
-	 * to what remains. */
+	 * handed back, because GNU does that too: diff.c raises horizon_lines
+	 * to the context width with the comment "so that shift_boundaries has
+	 * more freedom to shift the first and last hunks", and io.c spends
+	 * that horizon putting lines back into the middle at both ends. It is
+	 * why `diff -U0` and `diff -u` can report the same insertion at
+	 * different line numbers.
+	 *
+	 * Everything after this point -- discarding, the comparison, the
+	 * normalisation -- happens inside [pre, n - suf) and nowhere else. */
 	{
-		long pre = 0, suf = 0, keep = mode == 0 ? context : 0;
+		long keep = mode == 0 ? context : 0;
 		while (pre < a.n && pre < b.n && ea[pre] == eb[pre])
 			pre++;
 		while (suf < a.n - pre && suf < b.n - pre
@@ -1061,24 +1247,85 @@ int main(int argc, char **argv)
 			suf++;
 		pre -= pre < keep ? pre : keep;
 		suf -= suf < keep ? suf : keep;
-		shift_one(c.ch0 + pre, a.n - pre - suf, ea + pre,
-		          c.ch1 + pre);
-		shift_one(c.ch1 + pre, b.n - pre - suf, eb + pre,
-		          c.ch0 + pre);
 	}
+	mid0 = a.n - pre - suf;
+	mid1 = b.n - pre - suf;
+
+	/* Throw away the confusing lines, leaving the sequences the
+	 * comparison will actually see. With --minimal nothing is discarded,
+	 * which is the whole of what that option does here: GNU spells the
+	 * same thing `if (minimal || discards[i] == 0)` and runs the marking
+	 * anyway. */
+	un0 = xmalloc(sizeof *un0 * (size_t)(mid0 > 0 ? mid0 : 1));
+	un1 = xmalloc(sizeof *un1 * (size_t)(mid1 > 0 ? mid1 : 1));
+	ri0 = xmalloc(sizeof *ri0 * (size_t)(mid0 > 0 ? mid0 : 1));
+	ri1 = xmalloc(sizeof *ri1 * (size_t)(mid1 > 0 ? mid1 : 1));
+	{
+		char *d0 = xcalloc((size_t)(mid0 + mid1), 1);
+		char *d1 = d0 + mid0;
+
+		if (!minimal) {
+			/* equiv_count: how many lines of each file fall in
+			 * each class, counted over the middle only. */
+			long *n0 = xcalloc((size_t)t.nent * 2, sizeof *n0);
+			long *n1 = n0 + t.nent;
+
+			for (i = 0; i < mid0; i++)
+				n0[ea[pre + i]]++;
+			for (i = 0; i < mid1; i++)
+				n1[eb[pre + i]]++;
+			mark_discards(d0, ea + pre, mid0, n1);
+			mark_discards(d1, eb + pre, mid1, n0);
+			cancel_provisional(d0, mid0);
+			cancel_provisional(d1, mid1);
+			free(n0);
+		}
+		nun0 = apply_discards(d0, ea + pre, mid0, un0, ri0, ch0 + pre);
+		nun1 = apply_discards(d1, eb + pre, mid1, un1, ri1, ch1 + pre);
+		free(d0);
+	}
+	un0 = trim(un0, nun0);
+	un1 = trim(un1, nun1);
+	ri0 = trim(ri0, nun0);
+	ri1 = trim(ri1, nun1);
+
+	diags = nun0 + nun1 + 3;
+	fbuf = xmalloc(sizeof *fbuf * (size_t)diags);
+	bbuf = xmalloc(sizeof *bbuf * (size_t)diags);
+	c.ch0 = ch0 + pre;
+	c.ch1 = ch1 + pre;
+	c.ri0 = ri0;
+	c.ri1 = ri1;
+	c.xv = un0;
+	c.yv = un1;
+	c.fd = fbuf + nun1 + 1;
+	c.bd = bbuf + nun1 + 1;
+	/* GNU sets this from speed_large_files, which only -H turns on, so
+	 * the default is off and `!minimal` was wrong. See diag(). */
+	c.heuristic = 0;
+	c.too_expensive = 1;
+	for (i = diags; i != 0; i >>= 2)
+		c.too_expensive <<= 1;
+	if (c.too_expensive < 4096)
+		c.too_expensive = 4096;
+
+	compareseq(0, nun0, 0, nun1, minimal, &c);
+
+	shift_one(ch0 + pre, mid0, ea + pre, ch1 + pre);
+	shift_one(ch1 + pre, mid1, eb + pre, ch0 + pre);
 
 	if (mode == 1) {
 		long n0 = 0, n1 = 0;
 		for (i = 0; i < a.n; i++)
-			n0 += c.ch0[i];
+			n0 += ch0[i];
 		for (i = 0; i < b.n; i++)
-			n1 += c.ch1[i];
+			n1 += ch1[i];
 		printf("lines %ld %ld classes %ld changed %ld %ld\n",
 		       a.n, b.n, t.nent, n0, n1);
 		return 0;
 	}
 
-	build_script(&sc, c.ch0, a.n, c.ch1, b.n);
+	build_script(&sc, ch0, a.n, ch1, b.n);
 
 	if (mode == 2) {
 		for (i = 0; i < sc.n; i++) {

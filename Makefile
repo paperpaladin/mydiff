@@ -27,11 +27,18 @@ test: mydiff
 SANOPT = ASAN_OPTIONS=exitcode=86:detect_leaks=0 \
 	 UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1:exitcode=86
 
+ASAN_CFLAGS = -std=c11 -g -O1 -fsanitize=address,undefined \
+	      -fno-omit-frame-pointer -Wall -Wextra -Wpedantic \
+	      -ffile-prefix-map=$(CURDIR)=.
+
+# MYDIFF_ASAN tells the suite it is running against a sanitizer build, so it
+# can also check that the sanitizer is not blind: see the overread case in
+# t/run.sh. CC and ASAN_CFLAGS go with it because that case compiles a
+# deliberately broken copy of mydiff.c and has to build it the same way.
 test-asan: mydiff.c
-	$(CC) -std=c11 -g -O1 -fsanitize=address,undefined \
-		-fno-omit-frame-pointer -Wall -Wextra -Wpedantic \
-		-ffile-prefix-map=$(CURDIR)=. -o mydiff-asan mydiff.c
-	$(SANOPT) t/run.sh ./mydiff-asan
+	$(CC) $(ASAN_CFLAGS) -o mydiff-asan mydiff.c
+	$(SANOPT) MYDIFF_ASAN=1 CC='$(CC)' ASAN_CFLAGS='$(ASAN_CFLAGS)' \
+		t/run.sh ./mydiff-asan
 
 bench: mydiff
 	t/run.sh --bench ./mydiff

@@ -1,8 +1,10 @@
 # mydiff
 
-Myers' diff algorithm in one C11 file. Computes a shortest edit script between
-two text files, prints it as a unified diff, and applies one back again. The
-only test oracle is GNU diffutils and GNU patch.
+Myers' diff algorithm in one C11 file. Computes an edit script between two
+text files, prints it as a unified diff, and applies one back again. The
+only test oracle is GNU diffutils and GNU patch. The script is minimal under
+`--minimal`; by default it is whatever GNU's two heuristics make it, which
+is the point: the bar is agreement with `diff -u`, byte for byte.
 
 ## make test
 
@@ -17,16 +19,20 @@ corpus: 93 pairs
 
 93 agree with GNU diff byte-for-byte, 0 differ
 
-fuzz: 400 adversarial pairs
-388 agree with plain `diff -U N`, 12 differ
-of the 12, 12 are GNU disagreeing with its own
---minimal (discard_confusing_lines) and 0 are unexplained
+fuzz: 500 adversarial pairs
+500 agree with plain `diff -U N`, 0 differ
 
-996 passed, 0 failed
+2104 passed, 0 failed
 ```
 
-`make test-asan` runs the same 995 checks under
-`-fsanitize=address,undefined`, and also passes.
+`make test-asan` runs the same 2104 checks under
+`-fsanitize=address,undefined`, and also passes. It runs one more, 2105,
+which is about the sanitizer rather than about diff: see below.
+
+The suite refuses to run at all, with exit 2 and two lines saying so, if
+`diff`, `patch` or `python3` is missing. Every claim in it is a claim about
+what one of those three printed, so a run without them is not a reduced run,
+it is a pass count for nothing.
 
 ## Usage
 
@@ -56,10 +62,17 @@ isolation.
 Most reimplementations can only be checked loosely. You can test that a
 decompressor round-trips, or that a parser accepts valid input, but
 "byte-identical to the reference" is usually off the table because formatting
-is a matter of taste. Diff is different. Myers' algorithm produces a *minimal*
-edit script, GNU diffutils implements the same algorithm, and the unified
-format is fully specified down to where the newline goes. So exact agreement
-is achievable, and the bar can be set at it:
+is a matter of taste. Diff is different. Myers' algorithm produces a
+*minimal* edit script, GNU diffutils implements the same algorithm, and the
+unified format is fully specified down to where the newline goes. So exact
+agreement is achievable, and the bar can be set at it:
+
+That argument covers `--minimal` on both sides. GNU's default is not
+minimal, because it discards confusing lines first and gives up once a
+search gets expensive, and neither of those is derivable from the problem
+statement: they are choices with constants in them. Agreement there is a
+harder bar rather than a softer one, since nothing but a faithful copy of
+the heuristic will reproduce it, and the suite holds both at once.
 
 `mydiff A B` and `diff -u A B` must produce the same bytes, including the
 two header lines with their nanosecond mtimes, which this program formats the
@@ -84,23 +97,39 @@ This is the honest list. Several of these are deliberate and marked
 `shortcut:` in the source with their ceiling and upgrade path. The rest are
 simply absent.
 
-We differ from `diff -u`'s default output on a measurable class of inputs.
-GNU diff, by default, runs `discard_confusing_lines` before comparing: it
-throws away lines it judges unhelpful, a heuristic, and one that changes
-*which* of several equally short edit scripts comes out. This program does not
-implement it. The consequence, measured, not guessed:
+The output is not the minimal diff, and the claim here is not that it is.
+`discard_confusing_lines` is a heuristic: GNU throws away lines it judges
+unhelpful before comparing, which changes *which* of several edit scripts
+comes out and can make the answer longer than a minimal one. We implement
+the same heuristic, constants included, copied from diffutils' `analyze.c`
+rather than derived, because the only reason to have it is to agree with
+`diff -u`. So the claim is "agrees with GNU diff", never "produces the
+minimal diff". `--minimal`, on both programs, is what asks for the minimal
+one, and the suite checks that pairing separately.
 
-- On the 93-pair corpus: no difference at all, 93 of 93 byte-identical.
-- On 400 deliberately adversarial pairs (line alphabets of 1 to 3 distinct
-  values, dense changes, randomised context widths): 388 byte-identical to
-  plain `diff -u`, 400 byte-identical to `diff -u --minimal`.
-- All 12 differences are cases where GNU's *own* default output differs from
-  GNU's own `--minimal` output. The suite checks that for every one of them
-  and fails if any difference is left unexplained. That number is currently 0.
+This is the part of the project with the shortest history of being wrong.
+Until this was implemented, 12 of 400 adversarial pairs disagreed with plain
+`diff -u` and agreed with `diff -u --minimal`; both numbers are 0 and 500
+now. The heuristic's inner rules are not covered by inputs that merely look
+adversarial: a 160-line file over a 3-symbol alphabet never builds a run of
+discardable lines long enough for "a quarter of the run is provisional" or
+"three definite discards in a row" to mean anything, and mutating those
+constants left the suite green. 100 pairs built specifically to make long
+discard runs are what kill those mutations.
 
-Both scripts cost the same number of edits in every case observed, so this is
-a tie broken differently, not a worse answer. It is still a difference from
-the reference, and it is the first unchecked item in `PLAN.md`.
+Two mutations still survive and are not hidden here.
+
+- `too_expensive` is computed from the number of undiscarded lines plus
+  three, the way GNU computes it; computing it from the raw line count
+  instead changes nothing, because the result is clamped up to 4096 and the
+  unclamped value only exceeds 4096 somewhere past four million lines. The
+  two are the same function at every size the suite can afford.
+- `c.heuristic` can be set back to `!minimal` and nothing goes red. It
+  guards GNU's big-snake shortcut, which GNU enables only with `-H`. We have
+  no `-H`, so ours is now hard-wired off, and an instrumented build fired
+  the shortcut on none of the 500 fuzz pairs, 93 corpus pairs or 11 bench
+  pairs even with it forced on. That block is dead code, and it is dead in
+  both directions: no test can tell the flag's two settings apart.
 
 `-p` is not a replacement for patch(1), and is not trying to be.
 
@@ -135,6 +164,14 @@ regular, both text, is the whole input domain.
 shows which C function each hunk falls in. Here it selects patch mode. If you
 have muscle memory for `diff -p`, this will surprise you.
 
+The `too_expensive` bailout is still here and still non-minimal. Once a
+single `diag()` call has spent 4096 edits it stops looking for the best
+split and takes the furthest point either frontier reached. GNU does exactly
+this, unconditionally, which is why the two still agree; both answers can be
+longer than minimal. Only one pair in the suite reaches it (6000 distinct
+lines against a permutation of themselves), and before that pair was added
+nothing in the suite had ever executed that path.
+
 Both files are read entirely into memory, plus an equivalence-class table
 and two frontier arrays sized N+M. 400000 lines is comfortable; a file larger
 than RAM will not work and there is no streaming mode.
@@ -165,47 +202,44 @@ that cost tracks D, not file size. Measured (`make bench`, best of five,
 ```
 edit distance at fixed size (20000 lines each side)
          D    mydiff_ms      diff_ms    ratio
-         2            9            3    3.00x
-        20            9            5    1.80x
-       200            9            5    1.80x
-      2000           12            6    2.00x
-     10000          139            6   23.17x
-     20000          336            7   48.00x
+         2           10            3    3.33x
+        20           10            6    1.67x
+       200           10            6    1.67x
+      2000           11            7    1.57x
+     10000           10            6    1.67x
+     20000           11            7    1.57x
 
 file size at fixed edit distance (100 edits)
      lines    mydiff_ms      diff_ms    ratio
       1000            1            1    1.00x
       5000            3            2    1.50x
-     20000            9            5    1.80x
-    100000           45           20    2.25x
-    400000          224          101    2.22x
+     20000           10            5    2.00x
+    100000           61           22    2.77x
+    400000          263          110    2.39x
 
 like for like at large D: both sides forced minimal, so the
 comparison is of the same algorithm and not of GNU's heuristics
          D    mydiff_ms      diff_ms    ratio
-     10000          165          138    1.20x
-     20000          637          524    1.22x
+     10000          173          143    1.21x
+     20000          705          555    1.27x
 ```
 
-The claim holds: between D=2 and D=2000 the time barely moves, because the
-whole 9ms is the fixed cost of reading and hashing 1.8MB. That `(N+M)D` term only becomes visible past D=10000, where it goes quadratic-ish as expected.
+The claim holds: the first table is flat. Between D=2 and D=20000 the time
+barely moves, because the whole 10ms is the fixed cost of reading and
+hashing 1.8MB, and the `(N+M)D` term never gets to be visible: on these
+pairs the changed lines match nothing on the other side, so
+`discard_confusing_lines` throws them all away and the comparison that
+remains is tiny. Force both programs to be minimal and the same pair costs
+705ms, which is what that term actually looks like.
 
-Where we lose, and the part worth reading. Against plain `diff` at
-D=20000 we are 48 times slower. That number is almost entirely GNU's
-heuristics and almost nothing to do with the algorithm: force both programs
-to compute a genuinely minimal script and the same case closes to 1.22x. GNU
-wins there by not solving the problem: `discard_confusing_lines` plus the
-big-snake shortcut let it return a non-minimal answer quickly, and on a pair
-of 20000-line files with every line changed that is enormously cheaper. Our
-own copy of the big-snake heuristic does fire (it is why 336ms is not the
-637ms that `--minimal` costs), but without the line-discarding pass it cannot
-close the gap.
+The 48x in this table's previous version was that difference. We now carry
+GNU's heuristic, so the row is 1.57x instead, and the last table is the
+honest measurement of the algorithm itself: 1.21x and 1.27x against GNU with
+both sides minimal.
 
-On ordinary inputs: a handful of changes in a file of any size. We are
-1.5x to 2.5x slower, and that is constant-factor cost in reading and hashing,
-not asymptotics. It is a fair summary to say this is within a small multiple
-of GNU diff on the inputs people actually diff, and badly beaten on inputs
-where GNU gives up on minimality and we do not.
+On ordinary inputs, a handful of changes in a file of any size, we are 1.5x
+to 2.8x slower, and that is constant-factor cost in reading and hashing, not
+asymptotics. The 400000-line row is the one to watch if that ever matters.
 
 ## Build
 
@@ -224,6 +258,18 @@ across directory, timezone, locale, umask, hostname, user and `-j`.
 Scratch files go in `t/scratch/`, under the repo, never `/tmp`. The suite
 keys that directory on the binary name so `make test` and `make test-asan`
 can run at the same time.
+
+`make test-asan` also checks that ASan can still see anything at all. The
+undiscarded sequences are allocated at the size they would need if nothing
+were discarded, and most of what is allocated is then unused, so a read one
+past the end of one of them lands inside a live allocation and is reported
+by nobody. GNU packs all four arrays into a single block, which has exactly
+that shape. Here each is a separate allocation and each is realloc'd down to
+the length actually used, and the suite plants the over-read and requires
+ASan to report it: with the trim, 96 of the 500 fuzz pairs trip it; with the
+four arrays packed back into one block, 0 of 500 do, and the sanitizer run
+reports a clean pass over a program that is reading out of bounds. Three
+other repositories in this collection have had a bounds bug hidden that way.
 
 `detect_leaks=0` is set for `test-asan`, deliberately. This program reads two
 files, writes a diff and exits, so nothing is freed and LeakSanitizer reports

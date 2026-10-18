@@ -51,7 +51,87 @@ def fuzz(outdir, count):
             fh.write(sa)
         with open(base + ".b", "w") as fh:
             fh.write(sb)
-    print(count)
+    confusing(outdir, count, rnd)
+    print(count + CONFUSING)
+
+
+CONFUSING = 100
+
+
+def confusing(outdir, first, rnd):
+    """Pairs built to be long runs of discardable lines.
+
+    The pairs above do not reach most of discard_confusing_lines. Its outer
+    rule, "throw away a line that matches nothing and a line that matches
+    very many", fires on anything; its inner rules only apply inside a RUN of
+    discardable lines, and they measure that run: a quarter of it provisional
+    cancels the lot, a subrun of about sqrt(length/4) provisionals survives,
+    three definite discards in a row or the first one 8 lines in ends the
+    cancelling at each end. A run has to be dozens of lines long before those
+    numbers mean anything, and 160 lines of a 3-symbol alphabet never builds
+    one. Mutating those constants left the suite green.
+
+    So each pair here is a frame of lines that appear exactly once on both
+    sides (never discardable), wrapped around long stretches that mix lines
+    unique to one file (definitely discardable) with lines repeated far more
+    than the threshold (provisionally discardable), at a ratio drawn per
+    pair so that the quarter rule lands on both sides of its boundary."""
+    for i in range(CONFUSING):
+        runlen = rnd.choice([8, 17, 33, 70, 140])
+        # Fraction of each run that is provisional rather than definite.
+        prov = rnd.choice([0.0, 0.1, 0.2, 0.25, 0.4, 0.6, 0.9])
+        frames = rnd.randrange(2, 6)
+        hot = ["h%d" % k for k in range(rnd.choice([1, 2, 3]))]
+        a, b, uniq = [], [], [0]
+
+        # Half the pairs open with a hot line on the A side. The class
+        # numbers are handed out in order, so that makes the hot value
+        # class 0, and class 0 is the one GNU's marking loop skips --
+        # because -I and -B put the lines they ignore there, and we have
+        # neither option. Copying that skip would exempt this value from
+        # the heuristic; with no pair that starts this way, copying it
+        # changed nothing anywhere and the suite stayed green.
+        if hot and rnd.random() < 0.5:
+            a.append(hot[0])
+            b.append("blead%d" % i)
+
+        def run(dst, tag):
+            for _ in range(runlen):
+                if rnd.random() < prov:
+                    dst.append(rnd.choice(hot))
+                else:
+                    uniq[0] += 1
+                    dst.append("%s%d" % (tag, uniq[0]))
+
+        for f in range(frames):
+            anchor = ["anchor%d_%d" % (i, f * 3 + k) for k in range(3)]
+            a += anchor
+            b += anchor
+            run(a, "onlyA")
+            run(b, "onlyB")
+            # The hot lines have to be frequent on BOTH sides or they are
+            # merely unmatched, which is the other rule.
+            for _ in range(runlen):
+                a.append(rnd.choice(hot))
+                b.append(rnd.choice(hot))
+        # Two values landing exactly on the provisional threshold, which
+        # is "more than 5" for a file this short. One appears 5 times on
+        # the B side and one 6 times, so > 5 and >= 5 are different
+        # answers for the first, 5 and 6 different answers for the second.
+        # Without them the threshold could be moved by one in either
+        # direction and nothing in the suite noticed.
+        for val, n in (("warm5_%d" % i, 5), ("warm6_%d" % i, 6)):
+            for _ in range(n):
+                b.insert(rnd.randrange(len(b) + 1), val)
+            for _ in range(rnd.randrange(1, 4)):
+                a.insert(rnd.randrange(len(a) + 1), val)
+
+        u = rnd.choice([0, 1, 3, 10])
+        base = os.path.join(outdir, "%04d-U%d" % (first + i + 1, u))
+        with open(base + ".a", "w") as fh:
+            fh.write("".join(x + chr(10) for x in a))
+        with open(base + ".b", "w") as fh:
+            fh.write("".join(x + chr(10) for x in b))
 
 
 def bench(outdir):
