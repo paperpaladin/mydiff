@@ -74,7 +74,10 @@ static void slurp(struct file *f, const char *name)
 		die("cannot stat", name);
 	f->mtime = st.st_mtim;
 
-	/* st_size is a hint only: /proc and friends report 0. */
+	/* st_size is a hint only: /proc and friends report 0. The +1 is the
+	 * read loop's EOF test, not a sentinel: a short fread is the only
+	 * signal stdio gives, so cap has to exceed the file by at least one
+	 * byte or `got < cap` can never become true on the first pass. */
 	cap = st.st_size > 0 ? (size_t)st.st_size + 1 : 65536;
 	f->buf = xmalloc(cap);
 	for (;;) {
@@ -90,7 +93,31 @@ static void slurp(struct file *f, const char *name)
 	if (ferror(fp))
 		die("read error", name);
 	fclose(fp);
+
+	/* Shrink to the file. This is the same defect the undiscarded
+	 * sequences had and `trim` fixes there, in the buffer that holds
+	 * the untrusted input itself: a read one past the end of the data
+	 * lands inside the slack and no sanitizer reports it. A normal file
+	 * leaves exactly one byte of slack, which hides a one-past read; a
+	 * file whose st_size reads 0 (/proc and friends) starts at 65536 and
+	 * doubles, which hid a read 65 KB past the end. Nothing consumes a
+	 * byte at buf[len] -- every access here is bounded by a line's n --
+	 * so the exact length is the right size, and `make overread` plants
+	 * the read and requires ASan to report it rather than trusting this
+	 * comment. */
+	f->buf = realloc(f->buf, got ? got : 1);
+	if (!f->buf)
+		die("out of memory", NULL);
 	f->len = got;
+
+#ifdef MYDIFF_PLANT_OVERREAD
+	/* One byte past the data, deliberately. Under -fsanitize=address this
+	 * must be fatal. If it is not, this buffer is bigger than the file it
+	 * holds and every other sanitizer result about the two input files is
+	 * worth less than it looks. `make overread` requires the report. */
+	if (f->buf[f->len] == 0x55)
+		fprintf(stderr, "%s: planted over-read read a 0x55\n", prog);
+#endif
 
 	/* Count lines, then fill. Two passes beats growing an array. */
 	f->n = 0;

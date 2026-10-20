@@ -23,11 +23,19 @@ fuzz: 500 adversarial pairs
 500 agree with plain `diff -U N`, 0 differ
 
 2104 passed, 0 failed
+[overread] one-byte-slack: the sanitizer sees the read at buf[len]
+[overread] zero-st_size: the sanitizer sees the read at buf[len]
 ```
 
 `make test-asan` runs the same 2104 checks under
 `-fsanitize=address,undefined`, and also passes. It runs one more, 2105,
 which is about the sanitizer rather than about diff: see below.
+
+The two `[overread]` lines are a separate gate, `make overread`, which
+`make test` invokes last. They are not part of either count: each one builds
+a sanitizer binary with a read planted one byte past the end of a slurped
+file and requires ASan to report it. See below for what they are for and for
+the two cases they cover.
 
 The suite refuses to run at all, with exit 2 and two lines saying so, if
 `diff`, `patch` or `python3` is missing. Every claim in it is a claim about
@@ -245,8 +253,9 @@ asymptotics. The 400000-line row is the one to watch if that ever matters.
 
 ```sh
 make            # gcc -std=c11 -O2 -g, no dependencies
-make test       # the suite, needs diff, patch, python3
+make test       # the suite, needs diff, patch, python3; runs overread last
 make test-asan  # the same suite under ASan + UBSan
+make overread   # the two planted over-reads ASan is required to report
 make bench      # the tables above
 make clean
 ```
@@ -270,6 +279,30 @@ ASan to report it: with the trim, 96 of the 500 fuzz pairs trip it; with the
 four arrays packed back into one block, 0 of 500 do, and the sanitizer run
 reports a clean pass over a program that is reading out of bounds. Three
 other repositories in this collection have had a bounds bug hidden that way.
+
+That fix covered the undiscarded sequences and nothing else, and the buffer
+holding the input files had the same shape for six weeks after it. `slurp`
+allocated `st_size + 1` and read into it, so a read at `buf[len]` sat in
+exactly one byte of slack: measured, a one-past read on a 17-byte file was
+silent and a two-past read was reported as `0 bytes after 18-byte region`.
+The `/proc` case was far worse. `st_size` reads 0 there, which is why the
+65536 fallback exists, so a 211-byte `/proc/version` came back in a 65536-byte
+buffer and a read 65 KB past the end of the data was invisible. `slurp` now
+reallocs down to the exact length, and `make overread` is the gate: it plants
+the read at `buf[len]` behind `-DMYDIFF_PLANT_OVERREAD` and requires exit 86
+from the sanitizer for both cases, a normal file and a zero-`st_size` one. It
+also asserts that the second input really does report `st_size` 0, since
+otherwise that case would quietly become a second copy of the first.
+
+The `+ 1` stays. It is the read loop's EOF test, not a sentinel: a short
+`fread` is the only end-of-file signal stdio gives, so `cap` has to exceed
+the file by at least a byte or `got < cap` can never become true on the first
+pass. Nothing reads a byte at `buf[len]`; every access to the buffer goes
+through a `struct line` and is bounded by that line's length, including the
+unterminated final line, whose `p + n` is exactly `buf + len`. So the exact
+length is the right size to trim to, and the trim did not find a real
+out-of-bounds read: all 2105 checks still pass under the sanitizers with the
+slack gone.
 
 `detect_leaks=0` is set for `test-asan`, deliberately. This program reads two
 files, writes a diff and exits, so nothing is freed and LeakSanitizer reports

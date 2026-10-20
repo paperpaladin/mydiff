@@ -235,6 +235,24 @@ every answer the program gives and never once tested that it gives one.
       shortcut with a speedup it had nothing to do with. D=20000 at
       20000 lines went from 336ms to 11ms, 48x slower than GNU to
       1.57x.
+- [x] Trim the slurped file buffer to the file, and gate it
+      why: the earlier sweep for "a buffer larger than its data turns the
+      sanitizer off" fixed the undiscarded sequences here and stopped there.
+      `slurp` had the same shape in the buffer that holds the untrusted input
+      itself, which is the worst place in the program to be blind.
+      done: measured before changing anything, with the read planted at
+      `buf[len]` behind `-DMYDIFF_PLANT_OVERREAD`. A normal file was
+      `st_size + 1`, so the one-past read was silent and a two-past read was
+      reported as `0 bytes after 18-byte region`: exactly one byte of cover.
+      A zero-`st_size` input was much worse, 211 bytes of `/proc/version` in
+      a 65536-byte buffer, so a read 65 KB past the end said nothing. After
+      one realloc down to the exact length both cases report
+      `heap-buffer-overflow ... in slurp`. The `+ 1` is kept because it is the
+      read loop's EOF test and not a sentinel: nothing reads `buf[len]`, every
+      access is bounded by a line's own length. `make overread` is the gate,
+      invoked by `make test`, and removing the realloc turns it red with both
+      cases exiting 1 instead of 86. The now-sighted sanitizer found nothing
+      new: 2105 of 2105 still pass under ASan and UBSan.
 - [ ] Buffer `-p` output instead of streaming it
       why: a patch that fails on hunk three has already written hunks one and
       two to stdout. Exit 2 says the output is garbage but a careless caller
